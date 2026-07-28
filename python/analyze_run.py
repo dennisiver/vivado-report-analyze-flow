@@ -24,11 +24,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import manifest as manifest_mod          # noqa: E402
+import risk_report as risk_report_mod    # noqa: E402
+import risk_rules as risk_mod            # noqa: E402
 import trend as trend_mod                # noqa: E402
 import vivado_report_parser as parser_mod  # noqa: E402
+import vivado_reports as reports_mod     # noqa: E402
 
 
 NAME_WIDTH = 58
+
+# Printed for preflight_and_run.tcl to read, matching the ##MANIFEST_CHANGED##
+# convention already used by manifest.py.
+RISK_BLOCKERS_MARKER = "##RISK_BLOCKERS##"
 
 
 def _shorten(name, width=NAME_WIDTH):
@@ -255,13 +262,13 @@ def _render_trend(lines, records, stage):
     lines.append("## Trend (last {0} runs, stage `{1}`)".format(
         min(len(records), 8), stage))
     lines.append("")
-    lines.append("| Run | RTL | XDC | WNS (ns) | TNS (ns) | Setup fail |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| Run | RTL | XDC | WNS (ns) | TNS (ns) | Setup fail | BLOCKER |")
+    lines.append("|---|---|---|---|---|---|---|")
     for record in records[-8:]:
         rtl = record.get("rtl_git_commit") or "-"
         if record.get("rtl_git_dirty"):
             rtl += "*"
-        lines.append("| {0} | `{1}` | `{2}` | {3} | {4} | {5} |".format(
+        lines.append("| {0} | `{1}` | `{2}` | {3} | {4} | {5} | {6} |".format(
             record.get("timestamp", "-"),
             rtl,
             record.get("xdc_digest") or "-",
@@ -269,6 +276,7 @@ def _render_trend(lines, records, stage):
             _fmt(record.get("tns")),
             record.get("tns_failing_endpoints")
             if record.get("tns_failing_endpoints") is not None else "-",
+            record.get("blockers") if record.get("blockers") is not None else "-",
         ))
     lines.append("")
     lines.append("_`*` marks a run built from uncommitted RTL._")
@@ -277,7 +285,7 @@ def _render_trend(lines, records, stage):
 
 def render_markdown(parsed, stage, timestamp, manifest, comparison, preflight,
                     previous, history, endpoint_diff, top_paths, run_json,
-                    report_path, repo_root):
+                    report_path, repo_root, assessment=None, risk_path=None):
     lines = []
     meta = parsed.get("meta") or {}
     lines.append("# Timing analysis — `{0}` — {1}".format(stage, timestamp))
@@ -286,6 +294,11 @@ def render_markdown(parsed, stage, timestamp, manifest, comparison, preflight,
         meta.get("design", "?"), meta.get("device", "?"),
         meta.get("design_state", "?"), meta.get("tool_version", "?")))
     lines.append("")
+
+    # The verdict goes first: whether this bitstream is safe to take to the
+    # bench outranks any individual number below it.
+    if assessment:
+        lines.append(risk_report_mod.render_verdict_block(assessment, risk_path))
 
     _render_inputs(lines, manifest, comparison, preflight)
     _render_summary(lines, parsed.get("summary") or {},
@@ -315,6 +328,35 @@ def render_markdown(parsed, stage, timestamp, manifest, comparison, preflight,
 # Commands
 # --------------------------------------------------------------------------
 
+def _report_paths(args):
+    """Map report kind -> path, defaulting to the raw/ layout the Tcl writes.
+
+    Auto-discovery means a manual re-analysis picks up whatever reports the
+    build already produced, without having to name each one on the command line.
+    """
+    explicit = {
+        "utilization": args.utilization,
+        "drc": args.drc,
+        "methodology": args.methodology,
+        "cdc": args.cdc,
+        "clock_interaction": args.clock_interaction,
+        "control_sets": args.control_sets,
+    }
+    if any(explicit.values()):
+        return dict((kind, path) for kind, path in explicit.items() if path)
+
+    if args.no_auto_discover:
+        return {}
+
+    rawdir = os.path.join(args.outdir, "raw")
+    discovered = {}
+    for kind in reports_mod.PARSERS:
+        candidate = os.path.join(rawdir, "{0}_{1}.rpt".format(kind, args.stage))
+        if os.path.isfile(candidate):
+            discovered[kind] = candidate
+    return discovered
+
+
 def cmd_analyze(args):
     if not os.path.isfile(args.timing_summary):
         sys.stderr.write("error: report not found: {0}\n".format(args.timing_summary))
@@ -340,12 +382,23 @@ def cmd_analyze(args):
         parsed.get("paths") or [],
         previous.get("violating_endpoints") if previous else None)
 
+    report_paths = _report_paths(args)
+    reports = reports_mod.parse_reports(report_paths)
+    assessment = risk_mod.evaluate(
+        timing=parsed, reports=reports, manifest=manifest, preflight=preflight,
+        requested_reports=set(report_paths) if report_paths else None)
+    verdict = assessment["verdict"]
+
     record = trend_mod.make_record(
         args.stage, timestamp, summary, manifest,
         extra={"violating_endpoints": diff["current"][:50],
-               "constraints_met": parsed.get("constraints_met")})
+               "constraints_met": parsed.get("constraints_met")},
+        verdict=verdict)
 
     run_json = _run_json_path(args.outdir, args.stage, timestamp)
+    risk_path = os.path.join(args.outdir, "risk_{0}.md".format(args.stage))
+    latest = os.path.join(args.outdir, "latest_{0}.md".format(args.stage))
+
     _write_json(run_json, {
         "stage": args.stage,
         "timestamp": timestamp,
@@ -354,28 +407,42 @@ def cmd_analyze(args):
         "manifest": manifest,
         "manifest_comparison": comparison,
         "preflight": preflight,
+        "reports": reports,
+        "risk": assessment,
     })
 
     trend_mod.append_history(args.outdir, record)
     history = history + [record]
 
-    markdown = render_markdown(
+    _write_text(latest, render_markdown(
         parsed, args.stage, timestamp, manifest, comparison, preflight,
         previous, history, diff, top_paths, run_json,
-        os.path.abspath(args.timing_summary), args.repo_root)
+        os.path.abspath(args.timing_summary), args.repo_root,
+        assessment=assessment, risk_path=risk_path))
 
-    latest = os.path.join(args.outdir, "latest_{0}.md".format(args.stage))
-    _write_text(latest, markdown)
+    _write_text(risk_path, risk_report_mod.render_full_report(
+        assessment, args.stage, timestamp,
+        design=(parsed.get("meta") or {}).get("design"), summary_path=latest))
+
+    _write_json(os.path.join(args.outdir, "risk_{0}.json".format(args.stage)),
+                assessment)
     _write_text(os.path.join(args.outdir, "latest_{0}.json".format(args.stage)),
                 json.dumps({"run_json": run_json, "record": record},
                            indent=2, sort_keys=True) + "\n")
 
     print("Timing summary written: {0}".format(latest))
+    print("Risk report: {0}".format(risk_path))
     print("Run record: {0}".format(run_json))
     if summary.get("wns") is not None:
         print("WNS {0} ns, TNS {1} ns, {2} failing setup endpoint(s)".format(
             _fmt(summary.get("wns")), _fmt(summary.get("tns")),
             summary.get("tns_failing_endpoints")))
+    print("Verdict: bring-up {0}, sign-off {1} "
+          "({2} BLOCKER, {3} CRITICAL)".format(
+              "OK" if verdict["bringup_ok"] else "BLOCKED",
+              "OK" if verdict["signoff_ok"] else "BLOCKED",
+              verdict["blockers"], verdict["criticals"]))
+    print("{0} {1}".format(RISK_BLOCKERS_MARKER, verdict["blockers"]))
     return 0
 
 
@@ -433,6 +500,19 @@ def build_parser():
                         help="print full detail for the path matching this name")
     parser.add_argument("--run-json",
                         help="run record to drill into (with --show-path)")
+
+    group = parser.add_argument_group(
+        "additional reports",
+        "Paths to the other Vivado reports feeding the risk assessment. "
+        "When none are given they are auto-discovered under <outdir>/raw.")
+    group.add_argument("--utilization")
+    group.add_argument("--drc")
+    group.add_argument("--methodology")
+    group.add_argument("--cdc")
+    group.add_argument("--clock-interaction", dest="clock_interaction")
+    group.add_argument("--control-sets", dest="control_sets")
+    group.add_argument("--no-auto-discover", action="store_true",
+                       help="do not look for reports under <outdir>/raw")
     return parser
 
 

@@ -26,9 +26,14 @@
 #                        e.g. -exclude "*/tb/*" for testbenches
 #   -python <path>       explicit python3 interpreter
 #   -jobs <n>            parallel jobs for launch_runs, default 4
+#   -reports <list>      supporting reports to generate, default all six:
+#                        utilization drc methodology cdc clock_interaction
+#                        control_sets
 #   -check-only          run the audit and exit without launching
 #   -no-reset            never reset_run, even when the inputs changed
 #   -warn-missing-rtl    treat RTL missing from the fileset as a warning
+#   -fail-on-blocker     exit non-zero when the risk assessment finds a
+#                        BLOCKER, for gating write_bitstream or a deploy step
 # -----------------------------------------------------------------------------
 
 set script_dir [file normalize [file dirname [info script]]]
@@ -123,10 +128,12 @@ array set opts {
     outdir            ""
     repo_root         ""
     python            ""
+    reports           ""
     jobs              4
     check_only        0
     no_reset          0
     warn_missing_rtl  0
+    fail_on_blocker   0
 }
 set opts(rtl_dirs) {}
 set opts(xdc_dirs) {}
@@ -144,9 +151,11 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
         -rtl-dir          { lappend opts(rtl_dirs) [lindex $argv [incr i]] }
         -xdc-dir          { lappend opts(xdc_dirs) [lindex $argv [incr i]] }
         -exclude          { lappend opts(exclude)  [lindex $argv [incr i]] }
+        -reports          { set opts(reports)   [lindex $argv [incr i]] }
         -check-only       { set opts(check_only) 1 }
         -no-reset         { set opts(no_reset) 1 }
         -warn-missing-rtl { set opts(warn_missing_rtl) 1 }
+        -fail-on-blocker  { set opts(fail_on_blocker) 1 }
         default {
             puts "ERROR: unknown option '$flag'"
             exit 2
@@ -435,16 +444,33 @@ if {[llength [get_designs -quiet]]} {
 }
 open_run $run_name
 
-set summary [::vra::run_timing_report_and_analyze \
+set analyze_options [list \
     -stage $run_name \
     -outdir $outdir \
     -python $python \
     -preflight $preflight_json]
+if {$opts(reports) ne ""} {
+    lappend analyze_options -reports $opts(reports)
+}
+set summary [::vra::run_timing_report_and_analyze {*}$analyze_options]
 
 puts ""
 puts "==================================================================="
 puts " Done. Read this file (and only this file) for the timing result:"
 puts "   $summary"
+puts "   Risk report: [file join $outdir risk_${run_name}.md]"
 puts "==================================================================="
+
+# The build itself succeeded, so the default exit status stays 0. Gating on
+# risk is opt-in, to avoid silently breaking scripts that only expect a
+# non-zero status when Vivado actually failed.
+if {$::vra::blockers > 0} {
+    puts ""
+    puts " ⚠ 有 $::vra::blockers 項 BLOCKER —— 不建議在解決前拿這個 bitstream 上板驗證。"
+    if {$opts(fail_on_blocker)} {
+        puts " -fail-on-blocker 已啟用，以非 0 狀態結束。"
+        exit 1
+    }
+}
 
 exit 0

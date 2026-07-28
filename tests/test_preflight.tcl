@@ -11,6 +11,9 @@
 #   rerun         reuse an existing workdir without touching the files, so the
 #                 manifest sees identical inputs -> must not reset_run
 #   check_only    audit a healthy project but stop before building
+#   blocker       reports contain BLOCKER findings -> still exits 0 by default
+#   blocker_gated same, with -fail-on-blocker -> must exit non-zero
+#   missing_report  report_cdc fails -> must be reported as not checked
 #
 # The scenario builds a small tree on disk, points the stub project at some
 # subset of it, then runs the real pre-flight script and prints the outcome for
@@ -49,6 +52,16 @@ set xpr       [write_file [file join $workdir build top.xpr] "fake project"]
 source [file join $here vivado_stub.tcl]
 set ::stub::report_body [file join $repo examples sample_timing_summary.rpt]
 
+# Supporting reports are served from the canned samples. "missing_report" drops
+# CDC so the coverage rule has something to catch.
+foreach kind {utilization drc methodology cdc clock_interaction control_sets} {
+    set ::stub::report_bodies($kind) \
+        [file join $repo examples sample_${kind}.rpt]
+}
+if {$scenario eq "missing_report"} {
+    unset ::stub::report_bodies(cdc)
+}
+
 ::stub::set_run synth_1 PROGRESS "100%" STATUS "synth_design Complete!" \
     CONSTRSET constrs_1 SRCSET sources_1 NEEDS_REFRESH 0 \
     DIRECTORY [file join $workdir build synth_1]
@@ -61,8 +74,9 @@ set ::stub::report_body [file join $repo examples sample_timing_summary.rpt]
 ::stub::add_files constrs_1 [list $xdc_main $xdc_new]
 
 switch -exact -- $scenario {
-    ok - rerun - check_only {
-        # nothing to break
+    ok - rerun - check_only - blocker - blocker_gated - missing_report {
+        # nothing to break in the project itself; these scenarios differ only
+        # in which reports the stub serves and which flags are passed
     }
     missing_xdc {
         # The classic failure: new_io.xdc exists on disk but the project never
@@ -91,6 +105,9 @@ set argv [list \
 
 if {$scenario eq "check_only"} {
     lappend argv -check-only
+}
+if {$scenario eq "blocker_gated"} {
+    lappend argv -fail-on-blocker
 }
 
 source [file join $repo tcl preflight_and_run.tcl]

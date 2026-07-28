@@ -27,10 +27,14 @@ Qwen3.6-27B 在本地執行，context window 有限。原始的 `report_timing_s
 
 ### 讀取規則
 
-- Timing 相關的問題，**一律先讀 `timing_analysis/latest_<run>.md`**
-  （例如 `timing_analysis/latest_impl_1.md`）。這份摘要包含：
-  本次使用的 RTL commit 與 XDC digest、WNS/TNS/WHS/THS 及與上次的差異、
-  `check_timing` 統計、clock 清單、最差的 10 條路徑、以及趨勢表。
+- Timing 或「這版能不能上板」相關的問題，**一律先讀
+  `timing_analysis/latest_<run>.md`**（例如 `timing_analysis/latest_impl_1.md`）。
+  這份摘要包含：驗證風險判定與 BLOCKER 清單、本次使用的 RTL commit 與 XDC digest、
+  WNS/TNS/WHS/THS 及與上次的差異、`check_timing` 統計、clock 清單、
+  最差的 10 條路徑、以及趨勢表。
+
+- 需要 CRITICAL / WARNING 等級的詳細說明時，才讀 `timing_analysis/risk_<run>.md`。
+  摘要裡已經有全部的 BLOCKER，一般問題不需要讀這份。
 
 - **絕對不要讀取 `timing_analysis/raw/` 底下的 `.rpt` 檔案。**
   那是原始報告，有上萬行，讀進來會塞爆 context window。
@@ -49,16 +53,35 @@ Qwen3.6-27B 在本地執行，context window 有限。原始的 `report_timing_s
 
 ### 判讀順序
 
-1. 先看摘要最上方的 **Input versions**。如果 XDC digest 跟預期不符、
-   或顯示有未 commit 的設計檔，先向使用者確認輸入版本是否正確，
-   再去分析 slack 數字 —— 否則可能是在分析一份用錯輸入跑出來的結果。
+1. 先看最上方的 **驗證風險判定**。
+   - 有 BLOCKER 時，直接回報這些項目，並說明必須先解決才能上板。
+     **不要**在還有 BLOCKER 的情況下，把重點放在微調 WNS 上。
+   - 注意「可否上板 bring-up」與「可否 sign-off」是兩個不同的判定。
+     使用者問「現在能不能先上板測」時看前者；問「這版可不可以交」時看後者。
+   - 若列出了**未檢查的項目**，要主動提醒使用者：那個面向沒有被涵蓋，
+     不代表沒有問題。不要因為報告沒列出 CDC 問題就說 CDC 沒問題。
 
-2. 再看 **Constraint sanity (check_timing)**。
+2. 再看 **Input versions**。如果 XDC digest 跟預期不符、或顯示有未 commit 的設計檔，
+   先向使用者確認輸入版本是否正確，再去分析 slack 數字 ——
+   否則可能是在分析一份用錯輸入跑出來的結果。
+
+3. 再看 **Constraint sanity (check_timing)**。
    `unconstrained_internal_endpoints` 很大或 `no_clock` 不為 0，
    通常代表某個 constraint 根本沒被套用。這種情況下 WNS/TNS 沒有參考價值，
    應該先解決 constraint 問題，而不是去改 RTL。
 
-3. 確認上述兩點都正常後，才開始分析 WNS/TNS 與個別路徑。
+4. 確認上述都正常後，才開始分析 WNS/TNS 與個別路徑。
+
+### 嚴重度的意義
+
+嚴重度是由兩個判定推導出來的，回答使用者時請沿用這個區分：
+
+- **BLOCKER** —— 阻擋上板也阻擋 sign-off。例如 hold 違規：與時脈頻率無關，
+  降頻無法迴避，帶上板得到的任何結論都不可信。
+- **CRITICAL** —— 只阻擋 sign-off。例如 setup 違規：可以降頻先做 bring-up，
+  但原頻率下的行為未經驗證。
+- **WARNING** —— 影響穩定性或結果的可重複性（例如使用率過高造成壅塞）。
+- **INFO** —— 觀察項。
 
 ### 分析路徑時的常見判斷
 
@@ -68,6 +91,8 @@ Qwen3.6-27B 在本地執行，context window 有限。原始的 `report_timing_s
 - **同一個模組反覆出現在 Top 10** → 該模組是瓶頸，優先處理。
 - **跨 clock domain 的路徑** → 先確認是否應該加 `set_false_path` 或
   `set_max_delay -datapath_only`，而不是硬做 timing closure。
+  但要注意：加 exception 只是讓 timing 報告不再分析它，
+  **並沒有解決 metastability** —— 該加的同步器還是要加。
 
 ### 如果 pre-flight 中止了
 

@@ -1,0 +1,36 @@
+Copyright 1986-2021 Xilinx, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2021.2 (lin64) Build 3367213 Tue Oct 19 02:47:39 MDT 2021
+| Date         : Mon Jul 28 10:15:10 2025
+| Host         : fpga-ws01 running 64-bit Red Hat Enterprise Linux Server release 6.9
+| Command      : report_drc -file timing_analysis/raw/drc_impl_1.rpt
+| Design       : top
+| Device       : 7k325tffg900-2
+| Design State : Routed
+------------------------------------------------------------------------------------
+
+Report DRC
+
+Rule Deck Name: default
+Max Violations Per Rule: 20
+Violations found: 4
+
+NSTD-1#1 Critical Warning
+Unspecified I/O Standard
+12 out of 186 logical ports use I/O standard (IOSTANDARD) value 'DEFAULT', instead of a user assigned specific value. This may cause I/O contention or incompatibility with the board power or connectivity affecting performance, signal integrity or in extreme cases cause damage to the device or the components to which it is connected.
+Related violations: <none>
+
+UCIO-1#1 Critical Warning
+Unconstrained Logical Port
+12 out of 186 logical ports have no user assigned specific location constraint (LOC). This may cause I/O contention or incompatibility with the board power or connectivity affecting performance, signal integrity or in extreme cases cause damage to the device or the components to which it is connected.
+Related violations: <none>
+
+RTSTAT-6#1 Warning
+Nets with routing errors
+There is 1 net with routing errors. The problem bus(es) and/or net(s) are u_io/rx_data[3].
+Related violations: <none>
+
+PLHOLDVIO-2#1 Advisory
+Non-Optimal connections which could be optimized
+Instance u_core/u_pipe/mult_i_1 is connected to a non-optimal site.
+Related violations: <none>

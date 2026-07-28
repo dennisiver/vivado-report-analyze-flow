@@ -204,15 +204,29 @@ class TestAnalyzeRunCli(unittest.TestCase):
 
     def test_summary_stays_small_enough_to_read(self):
         # The whole point of the flow: the agent reads this instead of the
-        # raw report, so it has to stay far smaller than the source.
+        # raw report, so it has to stay far smaller than the source. Exercised
+        # with every supporting report present and violations in all of them,
+        # which is the worst case for summary length.
+        rawdir = os.path.join(self.dir, "raw")
+        os.makedirs(rawdir)
+        for kind in ("utilization", "drc", "methodology", "cdc",
+                     "clock_interaction", "control_sets"):
+            shutil.copy(
+                os.path.join(REPO, "examples", "sample_{0}.rpt".format(kind)),
+                os.path.join(rawdir, "{0}_impl_1.rpt".format(kind)))
+
         self._analyze()
         with open(os.path.join(self.dir, "latest_impl_1.md"),
                   encoding="utf-8") as handle:
-            summary_lines = len(handle.read().splitlines())
+            summary = handle.read()
+        summary_lines = len(summary.splitlines())
         with open(SAMPLE, encoding="utf-8") as handle:
             report_lines = len(handle.read().splitlines())
 
-        self.assertLess(summary_lines, 90)
+        # The verdict block earns its place, but the detail belongs in
+        # risk_<run>.md, which is only read on demand.
+        self.assertIn("驗證風險判定", summary)
+        self.assertLess(summary_lines, 120)
         self.assertLess(summary_lines, report_lines)
 
     def test_second_run_records_trend(self):

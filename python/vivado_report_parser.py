@@ -61,16 +61,22 @@ def _to_int(text):
     return None if value is None else int(value)
 
 
-def _normalise_column(name):
+def normalise_column(name):
     """``TNS Failing Endpoints`` -> ``tns_failing_endpoints``."""
     name = name.replace("(ns)", "").replace("(MHz)", "").strip()
     name = re.sub(r"[^0-9A-Za-z]+", "_", name)
     return name.strip("_").lower()
 
 
-def _column_spans(dash_line):
+def column_spans(dash_line):
     """Return (start, end) offsets for each run of dashes in a ruler line."""
     return [(m.start(), m.end()) for m in re.finditer(r"-{2,}", dash_line)]
+
+
+# Shared with report_tables.py, which parses the same two table styles in the
+# other Vivado reports.
+_normalise_column = normalise_column
+_column_spans = column_spans
 
 
 def _parse_meta(lines):

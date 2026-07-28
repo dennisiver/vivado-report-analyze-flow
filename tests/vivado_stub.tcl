@@ -22,6 +22,9 @@ namespace eval ::stub {
     variable designs {}
     variable log {}
     variable report_body ""
+
+    variable report_bodies       ;# report kind -> canned sample file
+    array set report_bodies {}
 }
 
 proc ::stub::record {line} {
@@ -132,11 +135,28 @@ proc report_timing_summary {args} {
     file copy -force $::stub::report_body $target
 }
 
-proc report_utilization {args} {
+# The supporting reports all behave the same way: copy a canned sample into
+# place, or fail loudly when the test wants to exercise the "report did not
+# run" path. ::stub::report_bodies maps report kind -> source file; a kind that
+# is absent from it makes the command raise, as an unavailable report would.
+proc ::stub::emit_report {kind args} {
+    variable report_bodies
+    ::stub::record "report_$kind"
+    if {![info exists report_bodies($kind)]} {
+        error "report_$kind is not available for this design (stub)"
+    }
     set index [lsearch -exact $args -file]
+    if {$index < 0} {
+        error "report_$kind called without -file"
+    }
     set target [lindex $args [expr {$index + 1}]]
     file mkdir [file dirname $target]
-    set handle [open $target w]
-    puts $handle "stub utilization report"
-    close $handle
+    file copy -force $report_bodies($kind) $target
 }
+
+proc report_utilization      {args} { ::stub::emit_report utilization {*}$args }
+proc report_drc              {args} { ::stub::emit_report drc {*}$args }
+proc report_methodology      {args} { ::stub::emit_report methodology {*}$args }
+proc report_cdc              {args} { ::stub::emit_report cdc {*}$args }
+proc report_clock_interaction {args} { ::stub::emit_report clock_interaction {*}$args }
+proc report_control_sets     {args} { ::stub::emit_report control_sets {*}$args }

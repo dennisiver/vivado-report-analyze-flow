@@ -1,0 +1,29 @@
+Copyright 1986-2021 Xilinx, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2021.2 (lin64) Build 3367213 Tue Oct 19 02:47:39 MDT 2021
+| Date         : Mon Jul 28 10:15:14 2025
+| Host         : fpga-ws01 running 64-bit Red Hat Enterprise Linux Server release 6.9
+| Command      : report_methodology -file timing_analysis/raw/methodology_impl_1.rpt
+| Design       : top
+| Device       : 7k325tffg900-2
+| Design State : Routed
+------------------------------------------------------------------------------------
+
+Report Methodology
+
+Violations found: 3
+
+TIMING-6#1 Critical Warning
+No common primary clock between related clocks
+The clocks clk_100 and clk_200 are related (timed together) but they have no common primary clock. The design could fail in hardware. Constrain these clocks as asynchronous with set_clock_groups, or provide a common primary clock.
+Related violations: <none>
+
+TIMING-14#1 Critical Warning
+LUT on the clock tree
+A LUT u_ctrl/clk_gate_i is driving the clock pin of 128 cells. Use a clock buffer (BUFGCE) instead of combinational logic to gate a clock.
+Related violations: <none>
+
+SYNTH-6#1 Warning
+Timing of a block is not optimal
+The instance u_core/u_pipe has a large fanout net which may affect timing.
+Related violations: <none>

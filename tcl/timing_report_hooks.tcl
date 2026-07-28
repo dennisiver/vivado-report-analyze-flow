@@ -14,6 +14,25 @@
 namespace eval ::vra {
     variable hooks_dir [file normalize [file dirname [info script]]]
     variable repo_root [file dirname $hooks_dir]
+
+    # Extra reports feeding the risk assessment: kind -> Vivado command.
+    # The kind doubles as the report filename stem, which is what lets
+    # analyze_run.py find them.
+    variable report_commands [list \
+        utilization       [list report_utilization] \
+        drc               [list report_drc] \
+        methodology       [list report_methodology] \
+        cdc               [list report_cdc -details] \
+        clock_interaction [list report_clock_interaction] \
+        control_sets      [list report_control_sets -verbose]]
+
+    variable default_reports {
+        utilization drc methodology cdc clock_interaction control_sets
+    }
+
+    # Number of BLOCKER-level risk findings from the most recent analysis,
+    # published here so preflight_and_run.tcl can gate on it.
+    variable blockers 0
 }
 
 # Locate a Python 3 interpreter without assuming the workstation has one on
@@ -85,17 +104,18 @@ proc ::vra::_parse_options {defaults_var args_list} {
 #   -max-paths  worst paths Vivado should emit per clock group
 #   -python     explicit interpreter path
 #   -preflight  preflight result json to fold into the summary
+#   -reports    which supporting reports to generate (default: all six)
 # -----------------------------------------------------------------------------
 proc ::vra::run_timing_report_and_analyze {args} {
     variable repo_root
 
-    array set options {
-        -stage     impl_1
-        -outdir    ""
-        -max-paths 10
-        -python    ""
-        -preflight ""
-    }
+    array set options [list \
+        -stage     impl_1 \
+        -outdir    "" \
+        -max-paths 10 \
+        -python    "" \
+        -preflight "" \
+        -reports   $::vra::default_reports]
     ::vra::_parse_options options $args
 
     if {$options(-outdir) eq ""} {
@@ -120,25 +140,46 @@ proc ::vra::run_timing_report_and_analyze {args} {
         -significant_digits 3 \
         -file $report
 
-    # Keep a routed-design utilization snapshot alongside it: it costs nothing
-    # here and answers "did the design just get bigger?" during triage.
-    set utilization [file join $rawdir "utilization_${stage}.rpt"]
-    if {[catch {report_utilization -file $utilization} message]} {
-        puts "vra: utilization report skipped ($message)"
-    }
-
     set python [::vra::find_python $options(-python)]
     set arguments [list \
         --stage $stage \
         --timing-summary $report \
         --outdir $outdir \
-        --repo-root $repo_root]
+        --repo-root $repo_root \
+        --no-auto-discover]
     if {$options(-preflight) ne ""} {
         lappend arguments --preflight $options(-preflight)
     }
 
+    # Generate the supporting reports. Each one is isolated: a command that is
+    # unavailable for this device or design state must not cost us the others.
+    # The path is passed to the analyser either way -- a report that failed to
+    # generate has to surface as "not checked", never as "nothing found".
+    array set commands $::vra::report_commands
+    foreach kind $options(-reports) {
+        if {![info exists commands($kind)]} {
+            puts "vra: unknown report '$kind', skipping"
+            continue
+        }
+        set target [file join $rawdir "${kind}_${stage}.rpt"]
+
+        # Remove any file left by an earlier run so a stale report can never be
+        # mistaken for this one's output.
+        file delete -force $target
+
+        if {[catch {{*}$commands($kind) -file $target} message]} {
+            puts "vra: $kind report skipped ($message)"
+        }
+        lappend arguments --[string map {_ -} $kind] $target
+    }
+
     puts "vra: summarising with $python"
-    ::vra::run_python $python analyze_run.py {*}$arguments
+    set output [::vra::run_python $python analyze_run.py {*}$arguments]
+
+    set ::vra::blockers 0
+    if {[regexp {##RISK_BLOCKERS##\s+(\d+)} $output -> count]} {
+        set ::vra::blockers $count
+    }
 
     return [file join $outdir "latest_${stage}.md"]
 }

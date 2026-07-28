@@ -57,7 +57,8 @@ def append_history(outdir, record):
         handle.write("\n")
 
 
-def make_record(stage, timestamp, summary, manifest=None, extra=None):
+def make_record(stage, timestamp, summary, manifest=None, extra=None,
+                verdict=None):
     """Build the compact per-run record stored in ``history.jsonl``."""
     record = {"stage": stage, "timestamp": timestamp}
     for key in ("wns", "tns", "tns_failing_endpoints", "tns_total_endpoints",
@@ -71,6 +72,12 @@ def make_record(stage, timestamp, summary, manifest=None, extra=None):
         record["rtl_git_dirty"] = git.get("dirty")
         record["sources_digest"] = manifest.get("digest", {}).get("sources", "")[:12]
         record["xdc_digest"] = manifest.get("digest", {}).get("constraints", "")[:12]
+
+    if verdict:
+        record["blockers"] = verdict.get("blockers")
+        record["criticals"] = verdict.get("criticals")
+        record["bringup_ok"] = verdict.get("bringup_ok")
+        record["signoff_ok"] = verdict.get("signoff_ok")
 
     if extra:
         record.update(extra)

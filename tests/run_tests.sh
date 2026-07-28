@@ -91,5 +91,34 @@ grep -q "reset_run" "$WORK/rerun.log" \
     && fail "rerun: reset an up-to-date run with unchanged inputs"
 echo "  ok  rerun -> unchanged inputs, no needless rebuild"
 
+# The canned reports contain CDC-1, NSTD-1/UCIO-1 and TIMING-6, so the risk
+# engine must grade this build as unsafe to take to the bench.
+status=$(run_scenario blocker)
+[ "$status" = "0" ] || fail "blocker: expected exit 0 without the gate flag, got $status"
+RISK="$WORK/blocker/timing_analysis/risk_impl_1.md"
+SUMMARY="$WORK/blocker/timing_analysis/latest_impl_1.md"
+[ -f "$RISK" ] || fail "blocker: no risk report produced"
+grep -q "驗證風險判定" "$SUMMARY" || fail "blocker: summary has no verdict block"
+grep -q "可否上板 bring-up | ❌" "$SUMMARY" \
+    || fail "blocker: bring-up should be blocked"
+grep -q "CDC-1" "$SUMMARY" || fail "blocker: CDC finding missing from summary"
+grep -q "NSTD-1" "$SUMMARY" || fail "blocker: DRC finding missing from summary"
+echo "  ok  blocker -> graded unsafe, still exits 0 by default"
+
+status=$(run_scenario blocker_gated)
+[ "$status" = "1" ] || fail "blocker_gated: expected exit 1, got $status"
+grep -q "fail-on-blocker" "$WORK/blocker_gated.log" \
+    || fail "blocker_gated: did not report why it failed"
+echo "  ok  blocker_gated -> -fail-on-blocker exits non-zero"
+
+# A report that fails to generate must read as "not checked", never as clean.
+status=$(run_scenario missing_report)
+[ "$status" = "0" ] || fail "missing_report: expected exit 0, got $status"
+MISSING_SUMMARY="$WORK/missing_report/timing_analysis/latest_impl_1.md"
+grep -q "未檢查的項目" "$MISSING_SUMMARY" \
+    || fail "missing_report: unavailable CDC report not surfaced"
+grep -q "CDC" "$MISSING_SUMMARY" || fail "missing_report: CDC gap not named"
+echo "  ok  missing_report -> unavailable analysis reported as a gap"
+
 echo
 echo "ALL TESTS PASSED"

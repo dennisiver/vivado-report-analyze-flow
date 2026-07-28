@@ -1,7 +1,8 @@
 # vivado-report-analyze-flow
 
-在離線工作站上，把每一次 Vivado 執行的 timing report 壓縮成一份「AI agent 讀得完」的摘要，
-並且在合成開始**之前**就擋掉「用到過期 RTL / 沒加進 fileset 的 XDC」這類問題。
+在離線工作站上，把每一次 Vivado 執行的報告壓縮成一份「AI agent 讀得完」的摘要，
+在合成開始**之前**就擋掉「用到過期 RTL / 沒加進 fileset 的 XDC」這類問題，
+並對結果做**風險分級**，明確回答：**這個 bitstream 能不能拿去上板驗證？哪些問題必須先解掉？**
 
 針對的環境：
 
@@ -13,7 +14,7 @@
 
 ---
 
-## 解決的兩個問題
+## 解決的三個問題
 
 **1. Report 太大，塞爆 context window**
 
@@ -43,6 +44,62 @@
 > 因為 XDC 沒有納入 git 版控，**檔案內容 hash 是唯一可靠的版本依據**，所以這裡不看 mtime
 > （checkout / rsync 會動到 mtime 但內容沒變，不該觸發重跑）。RTL 的 git commit 只是額外
 > 的佐證資訊。建議有空時把 `.xdc` 也納入 git，追蹤會更直接。
+
+**3. 光看數字不知道「能不能上板」**
+
+WNS = -0.234 ns 到底是「先上板沒關係」還是「絕對不能上板」？這需要 FPGA 的領域判斷，
+而不只是把數字列出來。而且真正會在實機上咬人的問題（metastability、未指定 I/O standard、
+壅塞）大多**不在 timing report 裡**。
+
+所以除了 timing，flow 還會產生並解析 utilization、DRC、methodology、CDC、
+clock interaction、control sets，然後對所有發現做風險分級。
+
+---
+
+## 風險分級模型
+
+每一項問題都用兩個獨立的判定來描述，因為在 FPGA 上這兩件事的答案常常不一樣：
+
+- **是否阻擋上板 bring-up** —— 現在拿這個 bitstream 去實驗室，得到的結論可不可信？
+- **是否阻擋 sign-off** —— 這樣可不可以交付？
+
+嚴重度是從這兩個判定推導出來的，不是另外標記的，所以分級永遠自洽：
+
+| 阻擋 bring-up | 阻擋 sign-off | 嚴重度 |
+|---|---|---|
+| ✓ | ✓ | **BLOCKER** |
+| ✗ | ✓ | **CRITICAL** |
+| ✗ | ✗（但需注意） | **WARNING** |
+| ✗ | ✗ | **INFO** |
+
+這個模型能表達 FPGA 領域最重要的一個區別：
+
+- **Setup 違規可以降頻先上板** —— 降低時脈就能做其他項目的 bring-up，
+  但原頻率下的行為未經驗證 → **CRITICAL**
+- **Hold 違規與頻率無關** —— 降頻完全無效，實機會隨溫度／電壓／批次隨機出錯
+  → **BLOCKER**
+
+### 哪些會被判為 BLOCKER
+
+| 來源 | 項目 | 為什麼不能上板 |
+|---|---|---|
+| timing | Hold 違規 | 與頻率無關，降頻無法迴避 |
+| timing | Pulse width 違規 | 時脈脈寬低於 primitive 規格，行為未定義 |
+| timing | `no_clock` | 那些 register 根本沒被 time 到，WNS 沒涵蓋它們 |
+| timing | 組合迴路 | 靜態時序分析無法描述，行為不可預測 |
+| timing | Setup 缺口 > 週期 10% | 要降的幅度大到已不具代表性 |
+| timing | 未約束 endpoint > 總數 1% | WNS 無法代表這個設計 |
+| CDC | Critical（CDC-1 等） | metastability，「實驗室正常、上板偶發」的典型根因 |
+| clock interaction | 無共同來源卻被同步分析 | 相位關係不確定，算出的 slack 不成立 |
+| DRC | `NSTD-1` / `UCIO-1` | 預設會擋下 write_bitstream；I/O 無電氣標準，有傷板風險 |
+| DRC | Error | 違反硬體基本規則 |
+| methodology | `TIMING-6/7/9` | Xilinx 自己標記為「時序結果不可信」 |
+
+閾值集中在 `python/risk_rules.py` 的 `DEFAULT_THRESHOLDS`，可依團隊標準調整。
+
+> **一個重要的安全性設計**：某項分析沒跑成功或無法解析時，**絕對不會顯示為「沒有問題」**。
+> 它會以「未檢查的項目」明確列出，並阻擋 sign-off。
+> 風險報告最怕的就是「看起來很乾淨，其實根本沒檢查」。
 
 ---
 
@@ -92,9 +149,11 @@ vivado -mode batch -source /opt/vivado-report-analyze-flow/tcl/preflight_and_run
 ```
 
 流程：稽核 fileset → 比對輸入 hash →（有變才）`reset_run` → `launch_runs` → `wait_on_run`
-→ `open_run` → 產生報告 → 輸出精簡摘要。
+→ `open_run` → 產生七份報告 → 風險分級 → 輸出精簡摘要。
 
-任何一步失敗都會以非 0 狀態結束，可以直接串在 shell 腳本裡擋下後續動作。
+pre-flight 稽核失敗或 Vivado 建置失敗都會以非 0 狀態結束。
+**風險分級預設不影響 exit code**（build 成功就是 0）；要用它來擋下後續的
+`write_bitstream` 或部署動作時，加上 `-fail-on-blocker`。
 
 ### 常用選項
 
@@ -111,6 +170,8 @@ vivado -mode batch -source /opt/vivado-report-analyze-flow/tcl/preflight_and_run
 | `-no-reset` | 即使輸入有變也不 `reset_run` |
 | `-warn-missing-rtl` | RTL 不在 fileset 時只警告不中止 |
 | `-jobs <n>` | `launch_runs` 的平行數，預設 4 |
+| `-reports <list>` | 要產生的輔助報告，預設六份全開。例如只要 timing 與 CDC：`-reports "cdc"` |
+| `-fail-on-blocker` | 有 BLOCKER 時以非 0 結束，用來擋下後續流程 |
 
 只想快速檢查有沒有漏加檔案，不要真的跑合成：
 
@@ -125,7 +186,9 @@ vivado -mode batch -source .../preflight_and_run.tcl -tclargs \
 
 ```
 timing_analysis/
-  latest_impl_1.md              <- AI agent 只需要讀這個檔案
+  latest_impl_1.md              <- AI agent 平常只需要讀這個檔案
+  risk_impl_1.md                <- 完整風險報告（要細節時才讀）
+  risk_impl_1.json              <- 風險評估的機器可讀版本
   latest_impl_1.json            <- 指向本次 run 完整紀錄的指標
   history.jsonl                 <- 每次執行一行，累積趨勢用，很小
   history/run_<時間>_impl_1.json <- 單次執行的完整結構化資料
@@ -134,9 +197,14 @@ timing_analysis/
     manifest_impl_1_previous.json
     compare_impl_1.json
     preflight_impl_1.json          <- 稽核結果（錯誤與警告）
-  raw/
-    timing_summary_impl_1.rpt   <- 原始報告，不要餵給 AI
+  raw/                          <- 原始報告，不要餵給 AI
+    timing_summary_impl_1.rpt
     utilization_impl_1.rpt
+    drc_impl_1.rpt
+    methodology_impl_1.rpt
+    cdc_impl_1.rpt
+    clock_interaction_impl_1.rpt
+    control_sets_impl_1.rpt
 ```
 
 建議把 `timing_analysis/` 加進 FPGA 專案的 `.gitignore`。
@@ -170,6 +238,10 @@ python3 /opt/vivado-report-analyze-flow/python/analyze_run.py \
 
 `latest_<run>.md` 的結構，依重要性排序：
 
+0. **驗證風險判定** —— 兩種判定的結論（可否上板 / 可否 sign-off）、各嚴重度的數量、
+   **BLOCKER 的完整清單**（每項都附「為什麼有風險」與「建議動作」）、
+   以及未檢查的項目。CRITICAL 以下的詳細說明放在 `risk_<run>.md`，
+   避免把 context window 塞爆。
 1. **Input versions** —— 這次用的 RTL commit（以及是否有未 commit 的設計檔）、
    XDC 內容 digest、跟上次比是否改變、稽核結果。
    *看到 timing 異常時第一個要確認的就是這段。*
@@ -184,7 +256,8 @@ python3 /opt/vivado-report-analyze-flow/python/analyze_run.py \
    logic levels 過多則是要考慮 pipeline）。
 6. **Violating endpoints vs previous run** —— 新增與已解決的違規 endpoint。
    判斷「這次修改到底有沒有效」最直接的一段。
-7. **Trend** —— 最近 8 次執行的 WNS/TNS/失敗數，以及各自對應的 RTL commit。
+7. **Trend** —— 最近 8 次執行的 WNS/TNS/失敗數/BLOCKER 數，
+   以及各自對應的 RTL commit。
 
 ---
 
@@ -205,21 +278,35 @@ sh tests/run_tests.sh
 
 不需要 Vivado，也不需要 licence：
 
-- **Python 單元測試** —— parser（含 `NA` 值、空報告、跨 clock group 排序）、
+- **Python 單元測試** —— timing parser（含 `NA` 值、空報告、跨 clock group 排序）、
+  六種報告的 parser（含截斷與格式不符必須降級而非拋例外）、
   manifest（hash 比對、mtime 不算變更、git porcelain 解析）、趨勢計算、CLI 行為。
+- **風險規則測試** —— 每條規則各一組輸入，斷言嚴重度與兩個判定旗標都正確。
+  重點案例：hold 違規兩者皆阻擋；setup 違規不阻擋 bring-up；
+  setup 缺口超過週期 10% 升級為 BLOCKER；`Safely Timed` 不得誤判為 unsafe；
+  **CDC 報告解析失敗時必須產生「未檢查」項目且不得判定為安全**。
 - **Pre-flight 情境測試** —— `tests/vivado_stub.tcl` 模擬一個最小的 Vivado 專案物件模型
-  （fileset、檔案屬性、run 生命週期），用 `tclsh` 直接驗證稽核邏輯：
-  漏加 XDC / 漏加 RTL / constraint 被 disable 都必須在 `launch_runs` **之前**中止，
-  而輸入沒變時不能做多餘的 `reset_run`。
+  （fileset、檔案屬性、run 生命週期、各 `report_*` 指令），用 `tclsh` 直接驗證：
+  漏加 XDC / 漏加 RTL / constraint 被 disable 都必須在 `launch_runs` **之前**中止；
+  輸入沒變時不能做多餘的 `reset_run`；
+  有 BLOCKER 時預設仍回傳 0，加 `-fail-on-blocker` 才非 0；
+  某份報告產生失敗時必須顯示為「未檢查」。
 
 ---
 
 ## 尚待用真實報告驗證
 
-`python/vivado_report_parser.py` 是依 Vivado 2021.2 的標準報告格式撰寫的，
-`examples/sample_timing_summary.rpt` 是照該格式手刻的範例。
+所有 parser 都是依 Vivado 2021.2 的標準報告格式撰寫的，`examples/` 下是照該格式手刻的範例。
 
-第一次在真實專案上使用後，請比對 `latest_<run>.md` 的數字與原始 `.rpt` 是否一致
-（特別是 WNS/TNS 與 Top 10 路徑）。若你的專案有自訂的 report 選項導致格式不同，
-把實際的 `.rpt` 片段提供出來即可據以調整 regex —— parser 各區塊是獨立的，
-單一區塊格式不符不會影響其他區塊。
+第一次在真實專案上使用後，請確認：
+
+1. 七份報告都有產生在 `timing_analysis/raw/`。
+2. `latest_<run>.md` 的數字與原始 `.rpt` 一致（特別是 WNS/TNS 與 Top 10 路徑）。
+3. 摘要中沒有出現非預期的「未檢查的項目」—— 若有，代表該報告的實際格式與這裡假設的
+   不同，把那份 `.rpt` 的表格片段提供出來即可據以調整。
+4. 風險判定與你對該設計的實際認知相符。若某條規則太嚴格或太寬鬆，
+   調整 `python/risk_rules.py` 的 `DEFAULT_THRESHOLDS` 即可。
+
+**DRC、methodology、CDC、clock interaction 這幾份報告的文字格式最需要實機確認。**
+每個 parser 都是獨立且 fail-soft 的，單一格式不符只會讓該項顯示為「未能解析」，
+不會影響其他分析，也不會中斷 flow。
