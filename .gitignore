@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# Analysis output, when this repo is used in place inside a project.
+timing_analysis/
