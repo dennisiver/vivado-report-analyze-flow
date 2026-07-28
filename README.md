@@ -56,6 +56,92 @@ clock interaction、control sets，然後對所有發現做風險分級。
 
 ---
 
+## 完整分析流程
+
+一次執行從頭到尾會經過八個階段。**前三個階段在合成開始之前**，這是刻意的 ——
+輸入有問題時要在花掉一小時之前就攔下來。
+
+```mermaid
+flowchart TD
+    A["vivado -mode batch -source preflight_and_run.tcl"] --> B{"1. Fileset 稽核"}
+    B -->|有錯誤| BX["中止 exit 1<br/>沒有浪費合成時間"]
+    B -->|通過| C["2. Manifest 比對<br/>RTL/XDC sha256 + git commit"]
+    C --> D{"輸入有變?"}
+    D -->|有| E["reset_run<br/>強制乾淨重跑"]
+    D -->|沒有| F["沿用 Vivado<br/>incremental"]
+    E --> G["3. launch_runs + wait_on_run"]
+    F --> G
+    G -->|建置失敗| GX["中止 exit 1"]
+    G -->|成功| H["4. 儲存 manifest 基準線"]
+    H --> I["5. open_run + 產生 7 份報告到 raw/"]
+    I --> J["6. 解析各報告"]
+    J --> K["7. 風險規則引擎"]
+    K --> L["8. 輸出 latest / risk / history"]
+    L --> M{"有 BLOCKER<br/>且 -fail-on-blocker?"}
+    M -->|是| MX["exit 1"]
+    M -->|否| MY["exit 0"]
+```
+
+### 各階段做什麼
+
+| # | 階段 | 內容 | 負責的檔案 | 失敗時 |
+|---|---|---|---|---|
+| 1 | Fileset 稽核 | 掃描 `-rtl-dir` / `-xdc-dir`，與 `sources_1` / `constrs_1` 做差集；檢查專案引用但已不存在的檔案、被 disable 的 constraint、`USED_IN_*` 範圍、synth 與 impl 的 constraint fileset 是否一致 | `tcl/preflight_and_run.tcl` | **中止，不建置** |
+| 2 | Manifest 比對 | 對所有 RTL/XDC 算 sha256（fileset ∪ 磁碟掃描），與上次**成功建置**的基準線比對；記錄 git commit 與未 commit 的設計檔 | `python/manifest.py` | 警告後繼續（不做變更偵測） |
+| 3 | 建置 | 輸入有變或 Vivado 標記 `NEEDS_REFRESH` 才 `reset_run`；必要時先跑 synth 母 run | `tcl/preflight_and_run.tcl` | **中止**，指向 run log |
+| 4 | 更新基準線 | 建置成功後才把這次的 manifest 存為新基準線 | `python/manifest.py --save` | — |
+| 5 | 產生報告 | `open_run` 後產生 7 份報告到 `raw/`；每份各自 `catch`，並先刪除舊檔避免誤用上次的結果 | `tcl/timing_report_hooks.tcl` | 該份跳過，其餘照跑 |
+| 6 | 解析 | timing 用專屬 parser；其餘六份共用通用表格解析（pipe 邊框 / ruler 對齊 / violation 區塊） | `vivado_report_parser.py`、`report_tables.py`、`vivado_reports.py` | 該項標為「未檢查」，**不會顯示成沒問題** |
+| 7 | 風險評估 | 套用規則集，每項發現標上「阻擋 bring-up」「阻擋 sign-off」，嚴重度由這兩者推導 | `python/risk_rules.py` | — |
+| 8 | 輸出 | 產生摘要、風險報告、歷史紀錄，並印出 `##RISK_BLOCKERS## <n>` 供 Tcl 讀取 | `analyze_run.py`、`risk_report.py`、`trend.py` | — |
+
+### 資料怎麼流
+
+```
+專案 .xpr ──┐
+            ├─► 階段 1 稽核 ──► preflight_<run>.json ──┐
+磁碟 RTL/XDC ┘                                          │
+            └─► 階段 2 hash ──► compare_<run>.json ─────┤
+                                                        │
+Vivado 建置 ──► raw/*.rpt (7 份) ──► 階段 6 解析 ────────┤
+                                                        ▼
+                                              階段 7 風險規則引擎
+                                                        │
+                    ┌───────────────────────────────────┼──────────────────┐
+                    ▼                                   ▼                  ▼
+          latest_<run>.md                       risk_<run>.md      history.jsonl
+      (判定 + BLOCKER + timing，                (全部嚴重度，       (每次一行，
+       AI agent 平常只讀這份)                    要細節才讀)         趨勢用)
+```
+
+三份輸出的分工就是這個專案的核心設計：**預設精簡，需要才展開**。
+`latest_<run>.md` 約 100 行以內，原始報告的上萬行留在 `raw/` 不進 context window，
+單一路徑的完整細節用 `--show-path` 按需取用。
+
+### 兩個貫穿全流程的原則
+
+**a) 能在建置前發現的，絕不等到建置後**
+
+階段 1 抓的是「改了 `.xdc` 但沒 `add_files`」這類問題。這種情況 Vivado 自己的
+out-of-date 偵測**永遠不會觸發** —— 因為那個檔案從頭到尾就不屬於這個專案，無從偵測起。
+只有在建置前主動比對磁碟與 fileset 才抓得到。
+
+**b) 沒檢查到的，絕不呈現為沒問題**
+
+階段 6 任何一份報告解析失敗，都會在階段 7 變成明確的「未檢查的項目」並阻擋 sign-off，
+而不是靜靜地不產生任何發現。這是風險報告最容易致命的地方。
+
+### 執行時間
+
+階段 1–2 只有檔案 I/O 與 hash，大型專案也在數秒內完成 ——
+相對於一輪 implementation 幾乎免費，所以預設一律執行。
+
+階段 5 的七份報告中，`report_drc` 與 `report_methodology` 在大型設計上可能各需數分鐘。
+若要縮短，用 `-reports` 只留下你在意的（例如 `-reports "cdc drc"`）；
+但被拿掉的項目會如實顯示為「未檢查」，不會假裝乾淨。
+
+---
+
 ## 風險分級模型
 
 每一項問題都用兩個獨立的判定來描述，因為在 FPGA 上這兩件事的答案常常不一樣：
@@ -267,6 +353,38 @@ python3 /opt/vivado-report-analyze-flow/python/analyze_run.py \
 內含可直接複製進專案 `AGENTS.md` 的段落。
 
 核心原則：**agent 只讀 `latest_<run>.md`，永遠不要讀 `raw/` 底下的原始 `.rpt`。**
+
+---
+
+## 檔案結構
+
+```
+tcl/
+  preflight_and_run.tcl      單一入口：稽核 → 建置 → 報告 → 風險（階段 1-4）
+  timing_report_hooks.tcl    產生 7 份報告並呼叫 Python（階段 5）
+                             也可獨立 source 給 non-project batch 流程使用
+python/
+  manifest.py                RTL/XDC hash manifest 與變更偵測（階段 2、4）
+  vivado_report_parser.py    timing summary 專屬 parser
+  report_tables.py           通用表格解析（pipe 邊框 / ruler 對齊 / violation 區塊）
+  vivado_reports.py          其餘六份報告的 parser，全部 fail-soft（階段 6）
+  risk_rules.py              風險規則集與嚴重度推導（階段 7）★ 閾值在這裡調
+  risk_report.py             中文風險報告的渲染
+  trend.py                   history.jsonl 的讀寫與跨執行比較
+  analyze_run.py             CLI 入口，串起上述所有模組（階段 8）
+examples/
+  sample_*.rpt               七種報告的手刻範例，供測試與格式對照
+tests/
+  vivado_stub.tcl            假的 Vivado 專案物件模型，讓稽核邏輯能在 tclsh 下測
+  test_preflight.tcl         pre-flight 情境測試
+  test_*.py                  parser / manifest / 風險規則的單元測試
+  run_tests.sh               一次跑完全部
+docs/
+  opencode-integration.md    給 Qwen 的 AGENTS.md 段落與判讀指引
+```
+
+要調整判定標準時，唯一需要改的是 `python/risk_rules.py` 裡的 `DEFAULT_THRESHOLDS`
+與各規則的兩個旗標；其餘模組不需要動。
 
 ---
 
