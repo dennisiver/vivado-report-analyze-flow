@@ -116,6 +116,17 @@ proc reset_run {name} {
 
 proc launch_runs {name args} { ::stub::record "launch_runs $name $args" }
 
+proc current_run {args} { ::stub::record "current_run $args" }
+
+proc current_fileset {args} { return sources_1 }
+
+proc synth_design {args} {
+    ::stub::record "synth_design $args"
+    if {[info exists ::stub::elaborate_fails]} {
+        error "elaboration failed (stub)"
+    }
+}
+
 proc wait_on_run {name} {
     ::stub::record "wait_on_run $name"
     # Simulate a run that completes successfully unless the test says otherwise.
@@ -160,3 +171,13 @@ proc report_methodology      {args} { ::stub::emit_report methodology {*}$args }
 proc report_cdc              {args} { ::stub::emit_report cdc {*}$args }
 proc report_clock_interaction {args} { ::stub::emit_report clock_interaction {*}$args }
 proc report_control_sets     {args} { ::stub::emit_report control_sets {*}$args }
+proc report_ip_status        {args} { ::stub::emit_report ip_status {*}$args }
+proc report_qor_assessment   {args} { ::stub::emit_report qor_assessment {*}$args }
+
+# Stage 0 asks the tool for its own version.
+proc version {args} {
+    if {[lsearch -exact $args -short] >= 0} {
+        return "2024.2"
+    }
+    return "Vivado v.2024.2 (64-bit)\nSW Build 5239630 on Fri Nov 08 22:34:34 MST 2024"
+}

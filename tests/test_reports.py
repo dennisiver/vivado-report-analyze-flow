@@ -256,7 +256,7 @@ class TestCheckReportsTool(unittest.TestCase):
         path = os.path.join(self.dir, "cdc_impl_1.rpt")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("\n".join([
-                "| Tool Version : Vivado v.2021.2 (lin64) Build 3367213",
+                "| Tool Version : Vivado v.2024.2 (lin64) Build 5239630",
                 "| Design       : secret_product_top",
                 "| Design State : Routed",
                 "",

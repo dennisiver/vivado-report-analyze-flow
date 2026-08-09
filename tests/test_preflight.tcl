@@ -14,6 +14,8 @@
 #   blocker       reports contain BLOCKER findings -> still exits 0 by default
 #   blocker_gated same, with -fail-on-blocker -> must exit non-zero
 #   missing_report  report_cdc fails -> must be reported as not checked
+#   synth_stage   both stages analysed -> latest_synth_1.md and latest_flow.md
+#   synth_gated   synth has BLOCKERs + -stop-on-synth-blocker -> impl never runs
 #
 # The scenario builds a small tree on disk, points the stub project at some
 # subset of it, then runs the real pre-flight script and prints the outcome for
@@ -54,7 +56,8 @@ set ::stub::report_body [file join $repo examples sample_timing_summary.rpt]
 
 # Supporting reports are served from the canned samples. "missing_report" drops
 # CDC so the coverage rule has something to catch.
-foreach kind {utilization drc methodology cdc clock_interaction control_sets} {
+foreach kind {utilization drc methodology cdc clock_interaction control_sets
+              ip_status qor_assessment} {
     set ::stub::report_bodies($kind) \
         [file join $repo examples sample_${kind}.rpt]
 }
@@ -74,7 +77,8 @@ if {$scenario eq "missing_report"} {
 ::stub::add_files constrs_1 [list $xdc_main $xdc_new]
 
 switch -exact -- $scenario {
-    ok - rerun - check_only - blocker - blocker_gated - missing_report {
+    ok - rerun - check_only - blocker - blocker_gated - missing_report -
+    synth_stage - synth_gated {
         # nothing to break in the project itself; these scenarios differ only
         # in which reports the stub serves and which flags are passed
     }
@@ -108,6 +112,9 @@ if {$scenario eq "check_only"} {
 }
 if {$scenario eq "blocker_gated"} {
     lappend argv -fail-on-blocker
+}
+if {$scenario eq "synth_gated"} {
+    lappend argv -stop-on-synth-blocker
 }
 
 source [file join $repo tcl preflight_and_run.tcl]

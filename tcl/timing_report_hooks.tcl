@@ -110,12 +110,16 @@ proc ::vra::run_timing_report_and_analyze {args} {
     variable repo_root
 
     array set options [list \
-        -stage     impl_1 \
-        -outdir    "" \
-        -max-paths 10 \
-        -python    "" \
-        -preflight "" \
-        -reports   $::vra::default_reports]
+        -stage      impl_1 \
+        -outdir     "" \
+        -max-paths  10 \
+        -python     "" \
+        -preflight  "" \
+        -stage-kind impl \
+        -logs       {} \
+        -waivers    "" \
+        -bitstream  "" \
+        -reports    $::vra::default_reports]
     ::vra::_parse_options options $args
 
     if {$options(-outdir) eq ""} {
@@ -146,9 +150,19 @@ proc ::vra::run_timing_report_and_analyze {args} {
         --timing-summary $report \
         --outdir $outdir \
         --repo-root $repo_root \
+        --stage-kind $options(-stage-kind) \
         --no-auto-discover]
     if {$options(-preflight) ne ""} {
         lappend arguments --preflight $options(-preflight)
+    }
+    if {$options(-waivers) ne ""} {
+        lappend arguments --waivers $options(-waivers)
+    }
+    if {$options(-bitstream) ne ""} {
+        lappend arguments --bitstream $options(-bitstream)
+    }
+    foreach log $options(-logs) {
+        lappend arguments --log $log
     }
 
     # Generate the supporting reports. Each one is isolated: a command that is

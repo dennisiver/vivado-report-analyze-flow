@@ -8,8 +8,9 @@
 
 | 項目 | 版本 |
 |---|---|
-| OS | Red Hat Enterprise Linux 6.9（離線，無法 pip 安裝套件） |
-| Vivado | 2021.2，project mode（`.xpr` + `launch_runs`） |
+| Vivado | **2024.2**，project mode（`.xpr` + `launch_runs`） |
+| OS | 執行時自動偵測並記錄（不寫死；不在 2024.2 支援清單時會明確標示） |
+| 網路 | 離線，無法 pip 安裝套件 —— 所以全部只用 Python 標準函式庫 |
 | AI agent | OpenCode 1.17.3 + Qwen3.6-27B（本地執行） |
 
 ---
@@ -52,93 +53,140 @@ WNS = -0.234 ns 到底是「先上板沒關係」還是「絕對不能上板」�
 壅塞）大多**不在 timing report 裡**。
 
 所以除了 timing，flow 還會產生並解析 utilization、DRC、methodology、CDC、
-clock interaction、control sets，然後對所有發現做風險分級。
+clock interaction、control sets、IP status、QoR assessment，
+**以及 Vivado 的 log**，然後對所有發現做風險分級。
+
+**4. 沒有一個涵蓋整個流程的檢查，也沒有給人簽核的報告**
+
+檔案清單裡的檔案在不在？工具版本換了沒？模組有沒有接上？這些散在不同地方，
+而且沒有一份東西能拿給人看著簽名。所以流程被拆成八個階段（見下節），
+每階段都能單獨執行，最後產出一份完整可稽核的 sign-off 報告。
 
 ---
 
-## 完整分析流程
+## 完整分析流程：八個階段
 
-一次執行從頭到尾會經過八個階段。**前三個階段在合成開始之前**，這是刻意的 ——
-輸入有問題時要在花掉一小時之前就攔下來。
+從輸入檔案到簽核報告，一次完整執行會經過八個階段。
+**前四個階段都在合成開始之前**，這是刻意的設計原則：**越便宜的檢查越早做**。
 
 ```mermaid
 flowchart TD
-    A["vivado -mode batch -source preflight_and_run.tcl"] --> B{"1. Fileset 稽核"}
-    B -->|有錯誤| BX["中止 exit 1<br/>沒有浪費合成時間"]
-    B -->|通過| C["2. Manifest 比對<br/>RTL/XDC sha256 + git commit"]
-    C --> D{"輸入有變?"}
-    D -->|有| E["reset_run<br/>強制乾淨重跑"]
-    D -->|沒有| F["沿用 Vivado<br/>incremental"]
-    E --> G["3. launch_runs + wait_on_run"]
-    F --> G
-    G -->|建置失敗| GX["中止 exit 1"]
-    G -->|成功| H["4. 儲存 manifest 基準線"]
-    H --> I["5. open_run + 產生 7 份報告到 raw/"]
-    I --> J["6. 解析各報告"]
-    J --> K["7. 風險規則引擎"]
-    K --> L["8. 輸出 latest / risk / history"]
-    L --> M{"有 BLOCKER<br/>且 -fail-on-blocker?"}
-    M -->|是| MX["exit 1"]
-    M -->|否| MY["exit 0"]
+    S0["0. check-env<br/>工具與環境版本基準線"] --> S1["1. check-files<br/>靜態檔案檢查（不需 Vivado）"]
+    S1 -->|清單有缺檔| X1["中止<br/>秒級就發現"]
+    S1 --> S2["2. check-project<br/>.xpr fileset 稽核"]
+    S2 -->|XDC 沒加進 fileset| X2["中止<br/>還沒開始合成"]
+    S2 --> S3["3. elaborate<br/>Elaboration 預檢"]
+    S3 -->|模組找不到 / 語法錯誤| X3["中止<br/>分鐘級"]
+    S3 --> S4["4. synth<br/>合成 + 分析"]
+    S4 -->|BLOCKER 且 -stop-on-synth-blocker| X4["中止<br/>不浪費 place & route"]
+    S4 --> S5["5. impl<br/>實作 + 分析"]
+    S5 --> S6["6. bitstream（選用）"]
+    S6 --> S7["7. signoff<br/>人類簽核報告"]
 ```
 
 ### 各階段做什麼
 
-| # | 階段 | 內容 | 負責的檔案 | 失敗時 |
+| # | 階段 | 檢查什麼 | 負責的檔案 | 需要 Vivado |
 |---|---|---|---|---|
-| 1 | Fileset 稽核 | 掃描 `-rtl-dir` / `-xdc-dir`，與 `sources_1` / `constrs_1` 做差集；檢查專案引用但已不存在的檔案、被 disable 的 constraint、`USED_IN_*` 範圍、synth 與 impl 的 constraint fileset 是否一致 | `tcl/preflight_and_run.tcl` | **中止，不建置** |
-| 2 | Manifest 比對 | 對所有 RTL/XDC 算 sha256（fileset ∪ 磁碟掃描），與上次**成功建置**的基準線比對；記錄 git commit 與未 commit 的設計檔 | `python/manifest.py` | 警告後繼續（不做變更偵測） |
-| 3 | 建置 | 輸入有變或 Vivado 標記 `NEEDS_REFRESH` 才 `reset_run`；必要時先跑 synth 母 run | `tcl/preflight_and_run.tcl` | **中止**，指向 run log |
-| 4 | 更新基準線 | 建置成功後才把這次的 manifest 存為新基準線 | `python/manifest.py --save` | — |
-| 5 | 產生報告 | `open_run` 後產生 7 份報告到 `raw/`；每份各自 `catch`，並先刪除舊檔避免誤用上次的結果 | `tcl/timing_report_hooks.tcl` | 該份跳過，其餘照跑 |
-| 6 | 解析 | timing 用專屬 parser；其餘六份共用通用表格解析（pipe 邊框 / ruler 對齊 / violation 區塊） | `vivado_report_parser.py`、`report_tables.py`、`vivado_reports.py` | 該項標為「未檢查」，**不會顯示成沒問題** |
-| 7 | 風險評估 | 套用規則集，每項發現標上「阻擋 bring-up」「阻擋 sign-off」，嚴重度由這兩者推導 | `python/risk_rules.py` | — |
-| 8 | 輸出 | 產生摘要、風險報告、歷史紀錄，並印出 `##RISK_BLOCKERS## <n>` 供 Tcl 讀取 | `analyze_run.py`、`risk_report.py`、`trend.py` | — |
+| 0 | `check-env` | Vivado 版本與 build、OS、主機、Python；**與上次的基準線比對** | `tcl/check_environment.tcl`、`python/environment.py` | 是（取版本） |
+| 1 | `check-files` | file list（`.f`/`.tcl`/`.txt`）每個檔案是否存在、`+incdir+` 目錄、**清單與 .xpr 雙向對帳**、重複模組定義 | `python/filelist.py` | **否** |
+| 2 | `check-project` | fileset vs 磁碟差集、專案引用但已不存在的檔案、被 disable 的 constraint、`USED_IN_*`、synth/impl constraint fileset 是否一致；同時算 RTL/XDC 的 sha256 manifest | `tcl/preflight_and_run.tcl`、`python/manifest.py` | 是 |
+| 3 | `elaborate` | `synth_design -rtl` 只做 elaboration：模組找不到、port 寬度不匹配、`include` 遺失、語法錯誤 | `tcl/elaborate_check.tcl` | 是 |
+| 4 | `synth` | 合成後的時序（**當作估算值評分**）、資源、CDC、log 訊息 | `tcl/preflight_and_run.tcl` | 是 |
+| 5 | `impl` | 繞線後的完整分析：timing、utilization、DRC、methodology、CDC、clock interaction、control sets、IP status、QoR | 同上 | 是 |
+| 6 | `bitstream` | 延伸到 `write_bitstream` 並確認 `.bit` 確實產生 | 同上 | 是 |
+| 7 | `signoff` | 彙整全部階段，產出**人類審閱簽核**用的完整報告 | `python/signoff_report.py` | **否** |
+
+### 三個貫穿全流程的原則
+
+**a) 能在建置前發現的，絕不等到建置後**
+
+階段 1 抓的是「改了 `.xdc` 但沒 `add_files`」「file list 裡的檔案不存在」這類問題。
+Vivado 自己的 out-of-date 偵測**永遠不會觸發** —— 那些檔案從頭到尾就不屬於這個專案，
+無從偵測起。只有主動比對才抓得到，而且**完全不需要啟動 Vivado**。
+
+**b) 沒檢查到的，絕不呈現為沒問題**
+
+任何一份報告解析失敗、任何一個階段沒執行，都會變成明確的「未檢查的項目」並阻擋
+sign-off，而不是靜靜地不產生任何發現。這是風險報告最容易致命的地方。
+
+**c) 同一個數字，在不同階段意義不同**
+
+合成後的時序是**尚未佈局的估算值**，負的 WNS 很常見而且經常被 implementation 修掉。
+若用繞線後的標準去評分，每次合成都會噴一堆假警報，使用者很快就會無視這份報告。
+所以評分會依階段調整：
+
+| 項目 | 合成後 (`synth`) | 繞線後 (`impl`) |
+|---|---|---|
+| Setup 違規（一般幅度） | WARNING（估算值） | CRITICAL |
+| Setup 缺口 > 週期 50% | CRITICAL | — |
+| Hold 違規 | **跳過**（還沒繞線，數字沒意義） | BLOCKER |
+| `no_clock`、未約束 endpoint、constraint 沒套用 | **與繞線後同級 BLOCKER** | 同左 |
+| CDC / clock interaction | **與繞線後同級** | 同左 |
+
+約束類問題在兩個階段同級，正是早期攔截的價值 —— 那些問題合成後就已經確定了。
+
+### Vivado log 訊息分析
+
+有些最要命的問題**只出現在 log 裡，任何 report 都看不到**。最典型的是：
+
+```
+WARNING: [Vivado 12-507] No objects matched 'get_ports pcie_refclk_p'
+```
+
+XDC 有加進 fileset、也被讀了，但這一行 constraint 指向不存在的 port，
+於是它完全沒有生效 —— 而後面所有 timing 數字都是在一組不完整的約束下算出來的。
+`check_timing` 只看得到後果（未約束的 endpoint），**log 才指出是哪一條 constraint**。
+
+兩個設計重點：
+
+1. **不能只看 severity。** 上面那則和 `inferring latch` 在 Vivado 裡都只是 `WARNING`。
+   只抓 `CRITICAL WARNING` 以上會把最有價值的漏掉。所以維護一份精選清單，
+   **同時用 message ID 與訊息文字比對** —— 文字比對是必要的安全網，因為 ID 會隨版本改變。
+2. **依 message ID 聚合**成計數 + 前 3 則範例，絕不逐條保留（一份 log 可能上萬行）。
+
+| 類別 | 分級 |
+|---|---|
+| constraint 沒套用（`No objects matched`…） | **BLOCKER** |
+| 模組沒接上（`black box`、`unable to bind`） | **BLOCKER** |
+| 推論出 latch（`inferring latch`） | CRITICAL |
+| 未驅動／多重驅動 | CRITICAL |
+| 位寬截斷 | WARNING |
 
 ### 資料怎麼流
 
 ```
-專案 .xpr ──┐
-            ├─► 階段 1 稽核 ──► preflight_<run>.json ──┐
-磁碟 RTL/XDC ┘                                          │
-            └─► 階段 2 hash ──► compare_<run>.json ─────┤
-                                                        │
-Vivado 建置 ──► raw/*.rpt (7 份) ──► 階段 6 解析 ────────┤
-                                                        ▼
-                                              階段 7 風險規則引擎
-                                                        │
-                    ┌───────────────────────────────────┼──────────────────┐
-                    ▼                                   ▼                  ▼
-          latest_<run>.md                       risk_<run>.md      history.jsonl
-      (判定 + BLOCKER + timing，                (全部嚴重度，       (每次一行，
-       AI agent 平常只讀這份)                    要細節才讀)         趨勢用)
+file list ──► 階段 1 ──► filelist_check.json ────┐
+.xpr ───────► 階段 2 ──► preflight/manifest ─────┤
+Vivado 版本 ─► 階段 0 ──► environment.json ──────┤
+                                                 ▼
+raw/*.rpt (9 份) ──► 解析 ──►         風險規則引擎 ◄── waivers.json
+raw/*.log ────────► 解析 ──►                │
+                                            │
+        ┌───────────────┬───────────────────┼──────────────┐
+        ▼               ▼                   ▼              ▼
+latest_flow.md   latest_<stage>.md    risk_<stage>.md  signoff_latest.md
+(總覽，agent      (判定 + BLOCKER,     (全部嚴重度,     (完整可稽核,
+ 先讀這份)         平常讀這份)          要細節才讀)      給人簽核)
 ```
 
-三份輸出的分工就是這個專案的核心設計：**預設精簡，需要才展開**。
-`latest_<run>.md` 約 100 行以內，原始報告的上萬行留在 `raw/` 不進 context window，
-單一路徑的完整細節用 `--show-path` 按需取用。
-
-### 兩個貫穿全流程的原則
-
-**a) 能在建置前發現的，絕不等到建置後**
-
-階段 1 抓的是「改了 `.xdc` 但沒 `add_files`」這類問題。這種情況 Vivado 自己的
-out-of-date 偵測**永遠不會觸發** —— 因為那個檔案從頭到尾就不屬於這個專案，無從偵測起。
-只有在建置前主動比對磁碟與 fileset 才抓得到。
-
-**b) 沒檢查到的，絕不呈現為沒問題**
-
-階段 6 任何一份報告解析失敗，都會在階段 7 變成明確的「未檢查的項目」並阻擋 sign-off，
-而不是靜靜地不產生任何發現。這是風險報告最容易致命的地方。
+**輸出分成給 agent 讀和給人讀兩類，這是核心設計**：
+`latest_flow.md` 與 `latest_<stage>.md` 刻意精簡（各約 30 / 100 行以內）；
+`signoff_latest.md` 刻意完整，因為簽核的人需要看到全部 ——
+包含哪些項目**沒有**被檢查。
 
 ### 執行時間
 
-階段 1–2 只有檔案 I/O 與 hash，大型專案也在數秒內完成 ——
-相對於一輪 implementation 幾乎免費，所以預設一律執行。
+| 階段 | 大致耗時 |
+|---|---|
+| 0–2 | 秒級（純檔案 I/O 與 hash） |
+| 3 elaborate | 分鐘級（完整合成的一小部分） |
+| 4–5 synth/impl | 數十分鐘 |
+| 7 signoff | 秒級 |
 
-階段 5 的七份報告中，`report_drc` 與 `report_methodology` 在大型設計上可能各需數分鐘。
-若要縮短，用 `-reports` 只留下你在意的（例如 `-reports "cdc drc"`）；
-但被拿掉的項目會如實顯示為「未檢查」，不會假裝乾淨。
+階段 5 的報告中 `report_drc` 與 `report_methodology` 在大型設計上可能各需數分鐘。
+要縮短就用 `-reports` 只留下你在意的；但被拿掉的項目會如實顯示為「未檢查」，
+不會假裝乾淨。
 
 ---
 
@@ -256,10 +304,10 @@ export FLOW=~/vivado-report-analyze-flow
 需要 Python 3.4 以上。以下**任一項可用即可**：
 
 ```bash
-# 1) 系統的 python3（RHEL 6.9 內建通常只有 python 2.6，所以要確認一下）
+# 1) 系統的 python3（舊版 RHEL 內建可能只有 python 2.x，所以要確認一下）
 which python3 && python3 --version
 
-# 2) Vivado 2021.2 自帶的 Python 3 —— 只要裝了 Vivado 就一定有
+# 2) Vivado 2024.2 自帶的 Python 3 —— 只要裝了 Vivado 就一定有
 ls $XILINX_VIVADO/tps/lnx64/python-3*/bin/python3
 ```
 
@@ -268,7 +316,7 @@ ls $XILINX_VIVADO/tps/lnx64/python-3*/bin/python3
 
 > `$XILINX_VIVADO` 這個環境變數是 Vivado 的 `settings64.sh` 設定的。
 > 如果上面第 2 個指令說找不到，先執行
-> `source /tools/Xilinx/Vivado/2021.2/settings64.sh`（路徑依你的安裝位置）再試一次。
+> `source /tools/Xilinx/Vivado/2024.2/settings64.sh`（路徑依你的安裝位置）再試一次。
 
 ### 步驟 5：驗證能正常運作
 
@@ -285,25 +333,30 @@ sh tests/run_tests.sh
 建議用你實際會用到的那一個再跑一次確認：
 
 ```bash
-PYTHON=$XILINX_VIVADO/tps/lnx64/python-3.8.3/bin/python3 sh tests/run_tests.sh
+PYTHON=$XILINX_VIVADO/tps/lnx64/python-3*/bin/python3 sh tests/run_tests.sh
 ```
 
 ### 步驟 6：對你的專案跑第一次
 
-先用 `-check-only`，它只做檔案稽核、**不會啟動合成**，幾秒鐘就結束，
-用來確認路徑都填對了：
-
 ```bash
 cd ~/我的FPGA專案
-vivado -mode batch -source $FLOW/tcl/preflight_and_run.tcl -tclargs \
-    -project   build/top.xpr \
-    -rtl-dir   rtl \
-    -xdc-dir   constrs \
-    -check-only
+cp $FLOW/config.mk.example config.mk
+# 編輯 config.mk，填入 PROJECT / RTL_DIRS / XDC_DIRS / FILELIST
 ```
 
-把 `build/top.xpr`、`rtl`、`constrs` 換成你專案裡實際的路徑。
-沒問題的話再拿掉 `-check-only` 跑完整流程（見下一節）。
+先跑**不需要 Vivado**的靜態檢查，幾秒鐘就結束：
+
+```bash
+make -f $FLOW/Makefile check-files
+```
+
+再跑需要 Vivado 但不會啟動合成的稽核：
+
+```bash
+make -f $FLOW/Makefile check-project
+```
+
+兩個都過了，再跑完整流程 `make -f $FLOW/Makefile all`（見下一節）。
 
 ### 安裝常見問題
 
@@ -320,27 +373,77 @@ vivado -mode batch -source $FLOW/tcl/preflight_and_run.tcl -tclargs \
 
 ## 使用方式
 
-> 以下的 `$FLOW` 就是安裝步驟 3 記下的資料夾位置
-> （例如 `~/vivado-report-analyze-flow`）。沒設過的話先跑一次
-> `export FLOW=~/vivado-report-analyze-flow`，或直接把它換成完整路徑。
+### 設定（只要做一次）
 
-把原本手動的 `launch_runs` 換成這個單一入口：
+```bash
+cd ~/你的FPGA專案
+cp $FLOW/config.mk.example config.mk
+```
+
+編輯 `config.mk` 填入你的路徑：
+
+```make
+PROJECT   = build/top.xpr
+RTL_DIRS  = rtl
+XDC_DIRS  = constrs
+FILELIST  = filelist.f      # 有外部 file list 才需要
+OUTDIR    = timing_analysis
+REPO_ROOT = .
+```
+
+之後所有指令都用 `make -f $FLOW/Makefile <target>` 執行。
+（懶得每次打 `-f`：在專案裡放一個一行的 `Makefile`，內容是
+`include /你的路徑/vivado-report-analyze-flow/Makefile`。）
+
+### 各階段可以單獨執行
+
+```bash
+make check-env       # 階段 0：工具與環境版本      [需要 Vivado]
+make check-files     # 階段 1：靜態檔案檢查        [不需 Vivado，秒級]
+make check-project   # 階段 2：.xpr 專案稽核       [需要 Vivado]
+make elaborate       # 階段 3：Elaboration 預檢    [需要 Vivado]
+make synth           # 階段 4：合成 + 分析
+make impl            # 階段 5：實作 + 分析
+make bitstream       # 階段 6：產生 bitstream
+make signoff         # 階段 7：人類簽核報告        [不需 Vivado]
+```
+
+組合用的 target：
+
+```bash
+make check     # 階段 0-3，所有建置前的檢查
+make all       # 階段 0-7 完整流程
+make help      # 列出全部 target 與目前設定
+make test      # 這個工具自己的測試（不需要 Vivado）
+make clean     # 清除分析輸出
+```
+
+各 target 之間**刻意不設 Make 相依**：合成流程的階段耗時差異太大
+（秒級 vs 數十分鐘），自動連鎖觸發只會帶來意外。要照順序跑就用 `make all`。
+
+### 建議的日常用法
+
+改了 RTL 或 XDC 之後，先花幾秒鐘跑不需要 Vivado 的檢查：
+
+```bash
+make check-files
+```
+
+要開始一輪完整建置時：
+
+```bash
+make all
+```
+
+### 不用 Makefile 也可以
+
+Makefile 只是包裝，底下就是直接呼叫腳本：
 
 ```bash
 vivado -mode batch -source $FLOW/tcl/preflight_and_run.tcl -tclargs \
-    -project   build/top.xpr \
-    -run       impl_1 \
-    -rtl-dir   rtl \
-    -xdc-dir   constrs \
-    -repo-root .
+    -project build/top.xpr -run impl_1 \
+    -rtl-dir rtl -xdc-dir constrs -repo-root .
 ```
-
-流程：稽核 fileset → 比對輸入 hash →（有變才）`reset_run` → `launch_runs` → `wait_on_run`
-→ `open_run` → 產生七份報告 → 風險分級 → 輸出精簡摘要。
-
-pre-flight 稽核失敗或 Vivado 建置失敗都會以非 0 狀態結束。
-**風險分級預設不影響 exit code**（build 成功就是 0）；要用它來擋下後續的
-`write_bitstream` 或部署動作時，加上 `-fail-on-blocker`。
 
 ### 常用選項
 
@@ -348,53 +451,76 @@ pre-flight 稽核失敗或 Vivado 建置失敗都會以非 0 狀態結束。
 |---|---|
 | `-project <xpr>` | **必要**，Vivado 專案 |
 | `-run <name>` | 要建置的 run，預設 `impl_1` |
-| `-rtl-dir <dir>` | 要稽核的 RTL 目錄，可重複指定 |
-| `-xdc-dir <dir>` | 要稽核的 XDC 目錄，可重複指定 |
+| `-rtl-dir <dir>` / `-xdc-dir <dir>` | 要稽核的目錄，可重複指定 |
 | `-outdir <dir>` | 分析輸出目錄，預設 `<xpr 所在目錄>/timing_analysis` |
 | `-repo-root <dir>` | RTL 的 git working tree，用來記錄 commit |
-| `-exclude <glob>` | 略過符合的檔案，可重複，例如 `-exclude "*/tb/*"` |
-| `-check-only` | 只做稽核，不啟動建置（很快，適合修改後先檢查） |
+| `-exclude <glob>` | 略過符合的檔案，例如 `-exclude "*/tb/*"` |
+| `-reports <list>` | 要產生的輔助報告，預設全開 |
+| `-waivers <file>` | 已核准豁免項目的檔案 |
+| `-check-only` | 只做稽核，不啟動建置 |
 | `-no-reset` | 即使輸入有變也不 `reset_run` |
 | `-warn-missing-rtl` | RTL 不在 fileset 時只警告不中止 |
-| `-jobs <n>` | `launch_runs` 的平行數，預設 4 |
-| `-reports <list>` | 要產生的輔助報告，預設六份全開。例如只要 timing 與 CDC：`-reports "cdc"` |
+| `-no-synth-analysis` | 不分析 synth 階段，只分析最終 run |
+| `-stop-on-synth-blocker` | synth 有 BLOCKER 就不進 implementation |
+| `-write-bitstream` | 延伸到 `write_bitstream` |
 | `-fail-on-blocker` | 有 BLOCKER 時以非 0 結束，用來擋下後續流程 |
+| `-jobs <n>` | `launch_runs` 的平行數，預設 4 |
 
-只想快速檢查有沒有漏加檔案，不要真的跑合成：
-
-```bash
-vivado -mode batch -source .../preflight_and_run.tcl -tclargs \
-    -project build/top.xpr -rtl-dir rtl -xdc-dir constrs -check-only
-```
+**風險分級預設不影響 exit code**（build 成功就是 0）。
+要用它擋下後續動作時才加 `-fail-on-blocker` 或 `-stop-on-synth-blocker`。
+`make signoff` 則會在有檢查項目 FAIL 時回傳非 0，所以 `make all` 也會據此失敗。
 
 ### 產出的檔案
 
-全部放在 `<outdir>`（預設 `timing_analysis/`）：
-
 ```
 timing_analysis/
-  latest_impl_1.md              <- AI agent 平常只需要讀這個檔案
-  risk_impl_1.md                <- 完整風險報告（要細節時才讀）
-  risk_impl_1.json              <- 風險評估的機器可讀版本
-  latest_impl_1.json            <- 指向本次 run 完整紀錄的指標
-  history.jsonl                 <- 每次執行一行，累積趨勢用，很小
-  history/run_<時間>_impl_1.json <- 單次執行的完整結構化資料
+  latest_flow.md              <- 跨階段總覽，AI agent 先讀這份
+  latest_<stage>.md           <- 各階段摘要（判定 + BLOCKER + timing）
+  risk_<stage>.md             <- 各階段完整風險說明（要細節才讀）
+  risk_<stage>.json           <- 機器可讀
+  signoff_latest.md           <- 人類簽核報告（完整，agent 不該讀）
+  signoff_<時間>.md            <- 同上，帶時間戳不會被覆寫
+  history.jsonl               <- 每次執行一行，趨勢用
+  history/run_<時間>_<stage>.json
   manifests/
-    manifest_impl_1_current.json   <- 上一次成功建置的輸入 hash（基準線）
-    manifest_impl_1_previous.json
-    compare_impl_1.json
-    preflight_impl_1.json          <- 稽核結果（錯誤與警告）
-  raw/                          <- 原始報告，不要餵給 AI
-    timing_summary_impl_1.rpt
-    utilization_impl_1.rpt
-    drc_impl_1.rpt
-    methodology_impl_1.rpt
-    cdc_impl_1.rpt
-    clock_interaction_impl_1.rpt
-    control_sets_impl_1.rpt
+    environment_current.json     <- 工具版本基準線
+    environment_compare.json
+    filelist_check.json          <- 靜態檔案檢查結果
+    manifest_<stage>_current.json <- 輸入 hash 基準線
+    preflight_<stage>.json       <- 稽核結果
+  raw/                        <- 原始報告與 log，不要餵給 AI
+    timing_summary_<stage>.rpt
+    utilization_<stage>.rpt   drc_<stage>.rpt        methodology_<stage>.rpt
+    cdc_<stage>.rpt           clock_interaction_<stage>.rpt
+    control_sets_<stage>.rpt  ip_status_<stage>.rpt  qor_assessment_<stage>.rpt
 ```
 
-建議把 `timing_analysis/` 加進 FPGA 專案的 `.gitignore`。
+建議把 `timing_analysis/` 與 `config.mk` 加進專案的 `.gitignore`。
+
+### Waiver：已審查並接受的項目
+
+在專案根目錄放 `waivers.json`：
+
+```json
+{"waivers": [
+  {"id": "DRC.CRITICAL_WARNING",
+   "match": {"rule": "RTSTAT-6"},
+   "reason": "已確認為 debug 訊號，不影響功能",
+   "approved_by": "Dennis",
+   "date": "2026-08-09",
+   "evidence_digest": "ab12cd34ef56"}
+]}
+```
+
+`evidence_digest` 從 sign-off 報告的「佐證 digest」欄位複製。
+
+**關鍵設計：waiver 綁定佐證內容的 hash。**
+一旦該項目的實際內容改變（違規數量增加、換成別的 instance），digest 不再吻合，
+**豁免會自動失效並重新阻擋**，同時在報告中列為「已失效的豁免」。
+這樣「不重複踩雷」才不會變成「把真問題永久靜音」。
+
+被豁免的項目仍然會完整列出並標記為已豁免，只是不再阻擋 sign-off。
+省略 `evidence_digest` 則接受當下的任何內容（比較寬鬆，不建議用在 BLOCKER 上）。
 
 ### 深入單一路徑
 
@@ -410,7 +536,7 @@ python3 $FLOW/python/analyze_run.py \
 
 ### 手動重新分析既有的報告
 
-不需要重跑 Vivado，也可以對任何 `report_timing_summary` 產物重新分析：
+不需要重跑 Vivado，也可以對任何既有的報告重新分析：
 
 ```bash
 python3 $FLOW/python/analyze_run.py \
@@ -460,63 +586,73 @@ python3 $FLOW/python/analyze_run.py \
 ## 檔案結構
 
 ```
+Makefile                     各階段的手動入口
+config.mk.example            專案設定範本（複製成 config.mk）
 tcl/
-  preflight_and_run.tcl      單一入口：稽核 → 建置 → 報告 → 風險（階段 1-4）
-  timing_report_hooks.tcl    產生 7 份報告並呼叫 Python（階段 5）
-                             也可獨立 source 給 non-project batch 流程使用
+  check_environment.tcl      階段 0：取 Vivado 版本
+  elaborate_check.tcl        階段 3：elaboration 預檢
+  preflight_and_run.tcl      階段 2/4/5/6：稽核 → 建置 → 報告 → 風險
+  timing_report_hooks.tcl    產生 9 份報告並呼叫 Python
 python/
-  manifest.py                RTL/XDC hash manifest 與變更偵測（階段 2、4）
+  environment.py             階段 0：工具/OS 偵測與基準線比對
+  filelist.py                階段 1：file list 解析、存在性、與 .xpr 對帳
+  manifest.py                RTL/XDC hash manifest 與變更偵測
   vivado_report_parser.py    timing summary 專屬 parser
-  report_tables.py           通用表格解析（pipe 邊框 / ruler 對齊 / violation 區塊）
-  vivado_reports.py          其餘六份報告的 parser，全部 fail-soft（階段 6）
-  risk_rules.py              風險規則集與嚴重度推導（階段 7）★ 閾值在這裡調
-  risk_report.py             中文風險報告的渲染
-  trend.py                   history.jsonl 的讀寫與跨執行比較
-  analyze_run.py             CLI 入口，串起上述所有模組（階段 8）
-  check_reports.py           自我檢查：對真實報告驗證各 parser 是否正確
-examples/
-  sample_*.rpt               七種報告的手刻範例，供測試與格式對照
-tests/
-  vivado_stub.tcl            假的 Vivado 專案物件模型，讓稽核邏輯能在 tclsh 下測
-  test_preflight.tcl         pre-flight 情境測試
-  test_*.py                  parser / manifest / 風險規則的單元測試
-  run_tests.sh               一次跑完全部
-docs/
-  opencode-integration.md    給 Qwen 的 AGENTS.md 段落與判讀指引
+  report_tables.py           通用表格解析（pipe / ruler / violation 區塊）
+  vivado_reports.py          其餘八份報告的 parser，全部 fail-soft
+  vivado_log.py              log 訊息解析與精選高風險清單
+  waivers.py                 豁免載入、比對、digest 失效判斷
+  risk_rules.py              風險規則集與嚴重度推導  ★ 閾值在這裡調
+  risk_report.py             風險報告渲染
+  flow_summary.py            跨階段總覽 latest_flow.md
+  signoff_report.py          人類簽核報告
+  trend.py                   history.jsonl 讀寫與跨執行比較
+  analyze_run.py             CLI 入口，串起上述所有模組
+  check_reports.py           自我檢查：對真實報告驗證各 parser
+examples/                    各報告與 log 的手刻範例
+tests/                       單元測試 + 假 Vivado 的情境測試
+docs/opencode-integration.md 給 Qwen 的 AGENTS.md 段落與判讀指引
 ```
 
 要調整判定標準時，唯一需要改的是 `python/risk_rules.py` 裡的 `DEFAULT_THRESHOLDS`
-與各規則的兩個旗標；其餘模組不需要動。
+與各規則的兩個旗標；要補 log 訊息就改 `python/vivado_log.py` 的
+`HIGH_RISK_MESSAGES`。其餘模組不需要動。
 
 ---
 
 ## 測試
 
 ```bash
-sh tests/run_tests.sh
+make test          # 或 sh tests/run_tests.sh
 ```
 
 不需要 Vivado，也不需要 licence：
 
-- **Python 單元測試** —— timing parser（含 `NA` 值、空報告、跨 clock group 排序）、
-  六種報告的 parser（含截斷與格式不符必須降級而非拋例外）、
-  manifest（hash 比對、mtime 不算變更、git porcelain 解析）、趨勢計算、CLI 行為。
+- **Python 單元測試** —— timing parser、九種報告的 parser（含截斷與格式不符必須降級
+  而非拋例外）、file list 解析（`.f` 遞迴、`+incdir+`、`.tcl` 的 `add_files`）、
+  log 訊息分析、環境基準線、waiver、趨勢計算、CLI 行為。
 - **風險規則測試** —— 每條規則各一組輸入，斷言嚴重度與兩個判定旗標都正確。
-  重點案例：hold 違規兩者皆阻擋；setup 違規不阻擋 bring-up；
-  setup 缺口超過週期 10% 升級為 BLOCKER；`Safely Timed` 不得誤判為 unsafe；
-  **CDC 報告解析失敗時必須產生「未檢查」項目且不得判定為安全**。
-- **Pre-flight 情境測試** —— `tests/vivado_stub.tcl` 模擬一個最小的 Vivado 專案物件模型
-  （fileset、檔案屬性、run 生命週期、各 `report_*` 指令），用 `tclsh` 直接驗證：
-  漏加 XDC / 漏加 RTL / constraint 被 disable 都必須在 `launch_runs` **之前**中止；
-  輸入沒變時不能做多餘的 `reset_run`；
-  有 BLOCKER 時預設仍回傳 0，加 `-fail-on-blocker` 才非 0；
-  某份報告產生失敗時必須顯示為「未檢查」。
+  最關鍵的幾條：
+  - hold 違規在 `impl` 兩者皆阻擋，在 `synth` **完全跳過**（還沒繞線）
+  - 一般 setup 違規在 `synth` 只是 WARNING、在 `impl` 是 CRITICAL
+  - `no_clock` 與 constraint 沒套用**在兩個階段同為 BLOCKER**
+  - 只有 WARNING 等級但屬於精選清單的 log 訊息**必須被抓成 BLOCKER**
+  - CDC 報告解析失敗時**必須產生「未檢查」項目且不得判定為安全**
+  - **waiver 在佐證內容改變時自動失效並重新阻擋**
+  - 格式錯誤的 `waivers.json` **不得意外豁免任何項目**
+- **Makefile 測試** —— `make check-files`、`make signoff` 在沒有 Vivado 的情況下
+  可完成；缺少 `config.mk` 時給出明確的中文錯誤訊息。
+- **情境測試** —— `tests/vivado_stub.tcl` 模擬一個最小的 Vivado 專案物件模型
+  （fileset、檔案屬性、run 生命週期、各 `report_*` 指令、`synth_design`、`version`），
+  用 `tclsh` 驗證：漏加 XDC/RTL、constraint 被 disable 都必須在 `launch_runs`
+  **之前**中止；輸入沒變時不做多餘的 `reset_run`；synth 與 impl 都會被分析並產生總覽；
+  `-stop-on-synth-blocker` 確實不進 implementation；報告產生失敗顯示為「未檢查」。
 
 ---
 
 ## 用真實報告驗證
 
-所有 parser 都是依 Vivado 2021.2 的標準報告格式撰寫的，`examples/` 下是照該格式手刻的範例。
+所有 parser 都是依 Vivado 2024.2 的標準報告格式撰寫的，`examples/` 下是照該格式手刻的範例。
 真實專案的格式可能有出入，所以第一次使用後請跑一次自我檢查。
 
 ### 自我檢查工具
@@ -552,7 +688,7 @@ severity 關鍵字這類**版面結構**，並把階層式的 instance/net 名�
 
 ```
   --- structural fingerprint (instance names masked) ---
-  | Tool Version : Vivado v.2021.2 (lin64) Build 3367213
+  | Tool Version : Vivado v.2024.2 (lin64) Build 5239630
   | Design State : Routed
   +----------+--------+---------------------------+------------------+
   | Severity | CDC ID | Description               | Endpoint         |
@@ -565,13 +701,18 @@ severity 關鍵字這類**版面結構**，並把階層式的 instance/net 名�
 
 ### 逐項確認清單
 
-1. 七份報告都有產生在 `timing_analysis/raw/`。
-2. `check_reports.py` 全部回報 OK。
+1. 九份報告都有產生在 `timing_analysis/raw/`。
+2. `check_reports.py` 全部回報 OK，包含 log 區塊有抓到預期的訊息類別。
 3. 抽取到的數值與原始 `.rpt` 一致（特別是 WNS/TNS、資源使用率、各 rule 的 severity）。
-4. `latest_<run>.md` 中沒有非預期的「未檢查的項目」。
+4. `latest_flow.md` 與 `latest_<run>.md` 中沒有非預期的「未檢查的項目」。
 5. 風險判定與你對該設計的實際認知相符。若某條規則太嚴格或太寬鬆，
    調整 `python/risk_rules.py` 的 `DEFAULT_THRESHOLDS` 即可。
 
-**DRC、methodology、CDC、clock interaction 這四份最需要實機確認**，
-因為它們的文字格式版本差異最大。每個 parser 都是獨立且 fail-soft 的，
+**最需要實機確認的是 log 的 message ID**：精選清單以訊息文字比對為主、ID 為輔，
+就是因為無法在此環境查證 2024.2 的確切編號。若 `check_reports.py` 的 log 區塊
+沒有列出你預期會看到的類別，把該行 log 原文貼出來就能補進
+`python/vivado_log.py` 的 `HIGH_RISK_MESSAGES`。
+
+**其次是 DRC、methodology、CDC、clock interaction、IP status 這幾份報告的表格格式**，
+因為它們的文字版面版本差異最大。每個 parser 都是獨立且 fail-soft 的，
 單一格式不符只會讓該項顯示為「未能解析」，不會影響其他分析，也不會中斷 flow。

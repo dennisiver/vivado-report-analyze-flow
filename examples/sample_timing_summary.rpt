@@ -1,11 +1,11 @@
-Copyright 1986-2021 Xilinx, Inc. All Rights Reserved.
+Copyright 1986-2024 Advanced Micro Devices, Inc. All Rights Reserved.
 ------------------------------------------------------------------------------------
-| Tool Version : Vivado v.2021.2 (lin64) Build 3367213 Tue Oct 19 02:47:39 MDT 2021
+| Tool Version : Vivado v.2024.2 (lin64) Build 5239630 Fri Nov 08 22:34:34 MST 2024
 | Date         : Mon Jul 28 10:14:52 2025
-| Host         : fpga-ws01 running 64-bit Red Hat Enterprise Linux Server release 6.9
+| Host         : fpga-ws01 running 64-bit Red Hat Enterprise Linux release 8.8
 | Command      : report_timing_summary -max_paths 10 -delay_type min_max -check_timing_verbose -report_unconstrained -significant_digits 3 -file timing_analysis/raw/timing_summary_impl.rpt
 | Design       : top
-| Device       : 7k325t-ffg900
+| Device       : xc7k325tffg900-2
 | Speed File   : -2  PRODUCTION 1.12 2019-09-04
 | Design State : Routed
 ------------------------------------------------------------------------------------

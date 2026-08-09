@@ -22,23 +22,35 @@ Qwen3.6-27B 在本地執行，context window 有限。原始的 `report_timing_s
 ```markdown
 ## Vivado Timing 分析
 
-每次 Vivado 建置都是透過 `<FLOW>/tcl/preflight_and_run.tcl` 執行的，
+每次 Vivado 建置都是透過 `make -f <FLOW>/Makefile` 執行的（八個階段），
 結果已經自動整理好，放在 `timing_analysis/` 底下。
+
+可用的階段（使用者可以單獨執行任一個）：
+`make check-env`（工具版本）、`make check-files`（靜態檔案檢查，不需要 Vivado）、
+`make check-project`（.xpr 稽核）、`make elaborate`（elaboration 預檢）、
+`make synth`、`make impl`、`make bitstream`、`make signoff`（人類簽核報告）。
 
 ### 讀取規則
 
-- Timing 或「這版能不能上板」相關的問題，**一律先讀
-  `timing_analysis/latest_<run>.md`**（例如 `timing_analysis/latest_impl_1.md`）。
-  這份摘要包含：驗證風險判定與 BLOCKER 清單、本次使用的 RTL commit 與 XDC digest、
-  WNS/TNS/WHS/THS 及與上次的差異、`check_timing` 統計、clock 清單、
-  最差的 10 條路徑、以及趨勢表。
+- 任何「這版能不能上板 / 有什麼問題」的問題，**先讀
+  `timing_analysis/latest_flow.md`**。這是跨階段總覽（約 30 行），
+  包含兩個判定、各階段的 BLOCKER/CRITICAL 數量、合併後的 BLOCKER 清單，
+  以及**未執行的階段**。
 
-- 需要 CRITICAL / WARNING 等級的詳細說明時，才讀 `timing_analysis/risk_<run>.md`。
-  摘要裡已經有全部的 BLOCKER，一般問題不需要讀這份。
+- 需要某個階段的細節時，再讀 `timing_analysis/latest_<stage>.md`
+  （例如 `latest_impl_1.md`、`latest_synth_1.md`）。
+  內容包含該階段的風險判定與 BLOCKER、本次使用的 RTL commit 與 XDC digest、
+  WNS/TNS/WHS/THS 及與上次的差異、`check_timing` 統計、最差的 10 條路徑、趨勢表。
 
-- **絕對不要讀取 `timing_analysis/raw/` 底下的 `.rpt` 檔案。**
-  那是原始報告，有上萬行，讀進來會塞爆 context window。
+- 需要 CRITICAL / WARNING 等級的完整說明時，才讀 `timing_analysis/risk_<stage>.md`。
+
+- **絕對不要讀取 `timing_analysis/raw/` 底下的 `.rpt` 或 `.log`。**
+  那是原始報告與 log，有上萬行，讀進來會塞爆 context window。
   摘要裡已經有你需要的所有彙總資訊。
+
+- **也不要讀 `signoff_*.md`。** 那是給人類審閱簽核用的完整報告，刻意冗長，
+  內容你在上面幾份檔案裡都已經有了。使用者若要簽核報告，
+  請他執行 `make signoff` 而不是把內容貼給你。
 
 - 需要某條路徑的完整 delay table 時，才執行：
 
@@ -53,7 +65,11 @@ Qwen3.6-27B 在本地執行，context window 有限。原始的 `report_timing_s
 
 ### 判讀順序
 
-1. 先看最上方的 **驗證風險判定**。
+0. **先確認階段涵蓋範圍**。`latest_flow.md` 會列出未執行的階段。
+   若使用者問的面向對應到沒跑過的階段，先說明那部分尚未檢查，
+   並建議他執行對應的 `make` target，而不是憑其他階段的結果推測。
+
+1. 再看 **驗證風險判定**。
    - 有 BLOCKER 時，直接回報這些項目，並說明必須先解決才能上板。
      **不要**在還有 BLOCKER 的情況下，把重點放在微調 WNS 上。
    - 注意「可否上板 bring-up」與「可否 sign-off」是兩個不同的判定。
@@ -71,6 +87,18 @@ Qwen3.6-27B 在本地執行，context window 有限。原始的 `report_timing_s
    應該先解決 constraint 問題，而不是去改 RTL。
 
 4. 確認上述都正常後，才開始分析 WNS/TNS 與個別路徑。
+
+### 階段差異：同一個數字，意義不同
+
+合成後（`synth_1`）的時序是**尚未佈局的估算值**。負的 WNS 在這個階段很常見，
+而且經常被 implementation 修掉，所以只會被評為 WARNING。
+**不要在 synth 階段就建議使用者去改 RTL 追時序**，除非缺口大到被評為 CRITICAL。
+
+但**約束類問題（`no_clock`、未約束 endpoint、constraint 沒套用）在兩個階段同級**，
+因為那些在合成後就已經確定，place & route 不會改變它們 —— 看到就該立刻處理。
+
+Hold 違規在 synth 階段**不會出現**（還沒繞線，數字沒有意義）；
+在 impl 階段則是 BLOCKER。
 
 ### 嚴重度的意義
 
@@ -94,6 +122,15 @@ Qwen3.6-27B 在本地執行，context window 有限。原始的 `report_timing_s
   但要注意：加 exception 只是讓 timing 報告不再分析它，
   **並沒有解決 metastability** —— 該加的同步器還是要加。
 
+### 已豁免的項目
+
+摘要中標記為「已豁免」的項目，代表已經有人審查並接受了那個風險。
+**不要重複建議修正已豁免的項目**，除非使用者主動問起。
+
+若報告顯示某個豁免「已失效」，那是因為該項目的實際內容改變了
+（違規數量增加、換成別的 instance），原本的審查已不再涵蓋現況 ——
+這種情況要主動提醒使用者重新審查。
+
 ### 如果 pre-flight 中止了
 
 `preflight_and_run.tcl` 若在稽核階段中止（例如某個 `.xdc` 沒加進 fileset），
@@ -105,6 +142,8 @@ Qwen3.6-27B 在本地執行，context window 有限。原始的 `report_timing_s
 ## 提醒使用者的注意事項
 
 - 摘要檔會**每次覆寫**。如果需要保留某次的結果，`timing_analysis/history/` 底下
-  有依時間戳記命名的完整 JSON，不會被覆寫。
+  有依時間戳記命名的完整 JSON，`signoff_<時間>.md` 也不會被覆寫。
+- 使用者若還沒跑過某個階段，agent 應該建議對應的 `make` target，
+  而不是從其他階段的結果推測。
 - `latest_<run>.md` 裡的 run 名稱對應 Vivado 的 run（`impl_1`、`synth_1`），
   同一個專案的不同 run 會各自有一份摘要與各自的趨勢紀錄。

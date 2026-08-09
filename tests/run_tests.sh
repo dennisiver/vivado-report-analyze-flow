@@ -23,6 +23,49 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 echo "== python unit tests ($PYTHON) =="
 "$PYTHON" -m unittest discover -s tests -p 'test_*.py' -v
 
+echo
+echo "== Makefile targets that need no Vivado =="
+MK="$WORK/mk"
+mkdir -p "$MK/rtl"
+echo 'module top; endmodule' > "$MK/rtl/top.v"
+printf 'rtl/top.v\nrtl/absent.v\n' > "$MK/files.f"
+cat > "$MK/config.mk" <<CONF
+FILELIST = files.f
+OUTDIR   = timing_analysis
+PYTHON   = $PYTHON
+CONF
+
+run_make() {
+    directory=$1
+    shift
+    set +e
+    ( cd "$directory" && make -f "$REPO/Makefile" "$@" >make.log 2>&1 )
+    status=$?
+    set -e
+    echo "$status"
+}
+
+# check-files must run and must fail on the missing file, with no Vivado.
+status=$(run_make "$MK" check-files)
+[ "$status" != "0" ] || fail "make check-files: should fail on a missing file"
+grep -q "MISSING" "$MK/make.log" || fail "make check-files: did not report the gap"
+echo "  ok  make check-files -> ran without Vivado, caught the missing file"
+
+# signoff must work from whatever artifacts exist, again with no Vivado.
+run_make "$MK" signoff STAGES=impl_1 >/dev/null
+[ -f "$MK/timing_analysis/signoff_latest.md" ] \
+    || fail "make signoff: no report produced"
+grep -q "NOT CHECKED" "$MK/timing_analysis/signoff_latest.md" \
+    || fail "make signoff: stages that never ran must read as NOT CHECKED"
+echo "  ok  make signoff -> report written, unrun stages marked NOT CHECKED"
+
+# A target needing config must explain itself rather than fail obscurely.
+status=$(run_make "$WORK" check-project)
+[ "$status" != "0" ] || fail "make check-project: should refuse without config"
+grep -q "尚未設定 PROJECT" "$WORK/make.log" \
+    || fail "make check-project: missing config gave no clear message"
+echo "  ok  make check-project -> clear error when config.mk is missing"
+
 if ! command -v "$TCLSH" >/dev/null 2>&1; then
     echo "== skipping pre-flight tests: no $TCLSH on PATH =="
     echo "ALL TESTS PASSED (python only)"
@@ -119,6 +162,33 @@ grep -q "未檢查的項目" "$MISSING_SUMMARY" \
     || fail "missing_report: unavailable CDC report not surfaced"
 grep -q "CDC" "$MISSING_SUMMARY" || fail "missing_report: CDC gap not named"
 echo "  ok  missing_report -> unavailable analysis reported as a gap"
+
+# Synthesis is analysed before implementation starts, and both roll up into a
+# single overview.
+status=$(run_scenario synth_stage)
+[ "$status" = "0" ] || fail "synth_stage: expected exit 0, got $status"
+SYNTH_DIR="$WORK/synth_stage/timing_analysis"
+[ -f "$SYNTH_DIR/latest_synth_1.md" ] || fail "synth_stage: no synth summary"
+[ -f "$SYNTH_DIR/latest_impl_1.md" ] || fail "synth_stage: no impl summary"
+[ -f "$SYNTH_DIR/latest_flow.md" ] || fail "synth_stage: no flow overview"
+grep -q "synth_1" "$SYNTH_DIR/latest_flow.md" \
+    || fail "synth_stage: overview does not mention the synth stage"
+# The synth stage must grade timing as a pre-placement estimate. The same WNS
+# is a CRITICAL at impl and only a WARNING here, so it lands in the risk report
+# rather than the compact summary -- which is itself the thing being asserted.
+grep -q "合成後 setup" "$SYNTH_DIR/risk_synth_1.md" \
+    || fail "synth_stage: timing not graded as a post-synthesis estimate"
+grep -q "Setup 違規：WNS" "$SYNTH_DIR/risk_impl_1.md" \
+    || fail "synth_stage: impl stage should grade the same slack as a result"
+echo "  ok  synth_stage -> both stages analysed, overview written"
+
+status=$(run_scenario synth_gated)
+[ "$status" = "1" ] || fail "synth_gated: expected exit 1, got $status"
+grep -q "stop-on-synth-blocker" "$WORK/synth_gated.log" \
+    || fail "synth_gated: did not say why it stopped"
+grep -q "launch_runs impl_1" "$WORK/synth_gated.log" \
+    && fail "synth_gated: ran implementation despite a synth blocker"
+echo "  ok  synth_gated -> stopped before implementation"
 
 echo
 echo "ALL TESTS PASSED"

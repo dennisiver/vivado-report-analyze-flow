@@ -23,12 +23,16 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import environment as environment_mod    # noqa: E402
+import filelist as filelist_mod          # noqa: E402
 import manifest as manifest_mod          # noqa: E402
 import risk_report as risk_report_mod    # noqa: E402
 import risk_rules as risk_mod            # noqa: E402
 import trend as trend_mod                # noqa: E402
+import vivado_log as log_mod             # noqa: E402
 import vivado_report_parser as parser_mod  # noqa: E402
 import vivado_reports as reports_mod     # noqa: E402
+import waivers as waivers_mod            # noqa: E402
 
 
 NAME_WIDTH = 58
@@ -341,6 +345,8 @@ def _report_paths(args):
         "cdc": args.cdc,
         "clock_interaction": args.clock_interaction,
         "control_sets": args.control_sets,
+        "ip_status": args.ip_status,
+        "qor_assessment": args.qor_assessment,
     }
     if any(explicit.values()):
         return dict((kind, path) for kind, path in explicit.items() if path)
@@ -357,12 +363,24 @@ def _report_paths(args):
     return discovered
 
 
-def cmd_analyze(args):
-    if not os.path.isfile(args.timing_summary):
-        sys.stderr.write("error: report not found: {0}\n".format(args.timing_summary))
-        return 2
+EMPTY_TIMING = {"meta": {}, "summary": {}, "constraints_met": None,
+                "check_timing": {"total": None, "items": {}}, "clocks": [],
+                "paths": [], "total_lines": 0}
 
-    parsed = parser_mod.parse_timing_summary_file(args.timing_summary)
+
+def cmd_analyze(args):
+    # Stages such as elaboration produce no timing report at all; they are
+    # assessed from their log. Only complain when a path was named and is
+    # unusable, which is a mistake rather than an absence.
+    if args.timing_summary:
+        if not os.path.isfile(args.timing_summary):
+            sys.stderr.write("error: report not found: {0}\n".format(
+                args.timing_summary))
+            return 2
+        parsed = parser_mod.parse_timing_summary_file(args.timing_summary)
+    else:
+        parsed = dict(EMPTY_TIMING)
+
     timestamp = datetime.datetime.now().replace(microsecond=0).isoformat()
 
     compare_data = manifest_mod.load_json(
@@ -384,10 +402,31 @@ def cmd_analyze(args):
 
     report_paths = _report_paths(args)
     reports = reports_mod.parse_reports(report_paths)
+
+    logs = log_mod.parse_logs(args.log) if args.log else None
+    waiver_data = waivers_mod.load_waivers(args.waivers) if args.waivers else None
+
+    environment_compare = manifest_mod.load_json(
+        os.path.join(args.outdir, "manifests", "environment_compare.json")) or {}
+    filelist_result = manifest_mod.load_json(
+        os.path.join(args.outdir, "manifests", "filelist_check.json"))
+
+    bitstream = None
+    if args.bitstream:
+        bitstream = {"requested": True, "path": args.bitstream,
+                     "exists": os.path.isfile(args.bitstream)}
+
     assessment = risk_mod.evaluate(
         timing=parsed, reports=reports, manifest=manifest, preflight=preflight,
-        requested_reports=set(report_paths) if report_paths else None)
+        requested_reports=set(report_paths) if report_paths else None,
+        stage_kind=args.stage_kind, logs=logs, filelist=filelist_result,
+        environment=environment_compare.get("environment"),
+        environment_comparison=environment_compare.get("comparison"),
+        bitstream=bitstream, waiver_data=waiver_data)
     verdict = assessment["verdict"]
+
+    if waiver_data:
+        print(waivers_mod.format_report(waiver_data, assessment["waivers"]))
 
     record = trend_mod.make_record(
         args.stage, timestamp, summary, manifest,
@@ -402,12 +441,14 @@ def cmd_analyze(args):
     _write_json(run_json, {
         "stage": args.stage,
         "timestamp": timestamp,
-        "report": os.path.abspath(args.timing_summary),
+        "report": (os.path.abspath(args.timing_summary)
+                   if args.timing_summary else None),
         "parsed": parsed,
         "manifest": manifest,
         "manifest_comparison": comparison,
         "preflight": preflight,
         "reports": reports,
+        "logs": logs,
         "risk": assessment,
     })
 
@@ -417,7 +458,8 @@ def cmd_analyze(args):
     _write_text(latest, render_markdown(
         parsed, args.stage, timestamp, manifest, comparison, preflight,
         previous, history, diff, top_paths, run_json,
-        os.path.abspath(args.timing_summary), args.repo_root,
+        (os.path.abspath(args.timing_summary)
+         if args.timing_summary else None), args.repo_root,
         assessment=assessment, risk_path=risk_path))
 
     _write_text(risk_path, risk_report_mod.render_full_report(
@@ -511,8 +553,21 @@ def build_parser():
     group.add_argument("--cdc")
     group.add_argument("--clock-interaction", dest="clock_interaction")
     group.add_argument("--control-sets", dest="control_sets")
+    group.add_argument("--ip-status", dest="ip_status")
+    group.add_argument("--qor-assessment", dest="qor_assessment")
     group.add_argument("--no-auto-discover", action="store_true",
                        help="do not look for reports under <outdir>/raw")
+
+    parser.add_argument("--stage-kind", choices=["synth", "impl"], default="impl",
+                        help="grade timing as a post-synthesis estimate or a "
+                             "post-route result (default: impl)")
+    parser.add_argument("--log", action="append", default=[],
+                        help="Vivado log to scan for messages (repeatable)")
+    parser.add_argument("--waivers",
+                        help="waivers.json listing accepted findings")
+    parser.add_argument("--bitstream",
+                        help="expected bitstream path; its absence becomes a "
+                             "finding when this is given")
     return parser
 
 
@@ -528,9 +583,6 @@ def main(argv=None):
                 args.run_json = pointer["run_json"]
         return cmd_show_path(args)
 
-    if not args.timing_summary:
-        sys.stderr.write("error: --timing-summary is required\n")
-        return 2
     return cmd_analyze(args)
 
 

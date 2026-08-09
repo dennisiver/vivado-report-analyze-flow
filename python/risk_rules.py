@@ -29,6 +29,9 @@ DEFAULT_THRESHOLDS = {
     # Setup slack worse than this fraction of the clock period stops being
     # something a bench frequency reduction can compensate for.
     "setup_severe_fraction": 0.10,
+    # Post-synthesis the number is a pre-placement estimate, so the bar for
+    # "implementation will not save this" sits much further out.
+    "setup_severe_fraction_synth": 0.50,
     # Unconstrained endpoints above this share of all endpoints mean the
     # headline WNS no longer describes the design.
     "unconstrained_severe_fraction": 0.01,
@@ -37,6 +40,7 @@ DEFAULT_THRESHOLDS = {
     "util_critical_percent": 90.0,
     "util_high_percent": 80.0,
     "control_sets_per_register": 0.20,
+    "qor_score_warn": 3,
 }
 
 # Vivado blocks write_bitstream on these by default; they also mean I/O has no
@@ -91,15 +95,21 @@ def _clock_period(timing):
 # Timing
 # ---------------------------------------------------------------------------
 
-def _evaluate_timing(timing, thresholds):
+def _evaluate_timing(timing, thresholds, stage_kind="impl"):
     findings = []
     if not timing:
         return findings
 
     summary = timing.get("summary") or {}
     checks = (timing.get("check_timing") or {}).get("items") or {}
+    post_synth = stage_kind == "synth"
 
+    # Hold slack before routing is not a real number -- the interconnect delay
+    # that dominates it does not exist yet. Grading it here would train the
+    # reader to ignore hold violations, which is the last thing we want.
     whs = summary.get("whs")
+    if post_synth:
+        whs = None
     if whs is not None and whs < 0:
         findings.append(finding(
             "TIMING.HOLD_VIOLATION",
@@ -129,7 +139,39 @@ def _evaluate_timing(timing, thresholds):
 
     wns = summary.get("wns")
     period = _clock_period(timing)
-    if wns is not None and wns < 0:
+    if wns is not None and wns < 0 and post_synth:
+        # Post-synthesis slack is a pre-placement estimate; a modest negative
+        # WNS here is routine and implementation usually recovers it. Only a
+        # gap too large for placement to close is worth acting on now.
+        severe = (period is not None
+                  and wns < -abs(period)
+                  * thresholds["setup_severe_fraction_synth"])
+        if severe:
+            findings.append(finding(
+                "TIMING.SETUP_SEVERE_SYNTH",
+                "合成後 setup 缺口過大：WNS = {0:.3f} ns（週期 {1:.3f} ns）".format(
+                    wns, period),
+                "合成後的時序是尚未佈局的估算值，implementation 通常能改善，"
+                "但缺口已超過週期的 {0:.0f}%，不是佈局繞線能補回來的幅度。"
+                "現在就處理，比跑完 implementation 再回頭省下一整輪時間。"
+                .format(thresholds["setup_severe_fraction_synth"] * 100),
+                "檢視最差路徑的邏輯層數，考慮插 pipeline 或重構；"
+                "也確認 constraint 的頻率目標是否合理。",
+                blocks_signoff=True,
+                evidence={"wns_ns": wns, "period_ns": period,
+                          "stage_kind": "synth"},
+                source="report_timing_summary"))
+        else:
+            findings.append(finding(
+                "TIMING.SETUP_VIOLATION_SYNTH",
+                "合成後 setup 未收斂：WNS = {0:.3f} ns".format(wns),
+                "這是尚未佈局的估算值，implementation 有機會修掉，"
+                "此階段不視為問題，僅供追蹤。",
+                "先讓 implementation 跑完再看實際結果。",
+                evidence={"wns_ns": wns, "period_ns": period,
+                          "stage_kind": "synth"},
+                source="report_timing_summary"))
+    elif wns is not None and wns < 0:
         severe = (period is not None
                   and wns < -abs(period) * thresholds["setup_severe_fraction"])
         if severe:
@@ -487,8 +529,16 @@ def _evaluate_methodology(methodology):
 # Utilization and control sets
 # ---------------------------------------------------------------------------
 
-def _evaluate_utilization(utilization, control_sets, thresholds):
+def _evaluate_utilization(utilization, control_sets, thresholds,
+                          stage_kind="impl"):
     findings = []
+    # Post-synthesis numbers are estimates from before placement, so only an
+    # outright overflow is meaningful; anything else would be a false alarm.
+    critical_at = (100.0 if stage_kind == "synth"
+                   else thresholds["util_critical_percent"])
+    high_at = (100.0 if stage_kind == "synth"
+               else thresholds["util_high_percent"])
+
     if utilization and utilization.get("available"):
         for key, resource in sorted((utilization.get("resources") or {}).items()):
             percent = resource["util_percent"]
@@ -499,18 +549,18 @@ def _evaluate_utilization(utilization, control_sets, thresholds):
                         "used": resource["used"],
                         "available": resource["available"]}
 
-            if percent >= thresholds["util_critical_percent"]:
+            if percent >= critical_at:
                 findings.append(finding(
                     "UTIL.CRITICAL", label,
                     "使用率超過 {0:.0f}% 會造成繞線壅塞，時序結果變得不可重複 —— "
                     "只改一行 RTL 就可能讓 WNS 大幅變動。這會讓後續除錯失去基準，"
                     "也代表目前的時序餘裕沒有可靠性可言。"
-                    .format(thresholds["util_critical_percent"]),
+                    .format(critical_at),
                     "降低資源使用（共用邏輯、改用 BRAM 取代分散式記憶體），"
                     "或改用更大的元件。",
                     blocks_signoff=True, evidence=evidence,
                     source="report_utilization"))
-            elif percent >= thresholds["util_high_percent"]:
+            elif percent >= high_at:
                 findings.append(finding(
                     "UTIL.HIGH", label,
                     "使用率偏高，繞線難度增加，時序結果的重複性會開始下降。",
@@ -612,47 +662,393 @@ def _report_label(kind):
 
 
 # ---------------------------------------------------------------------------
+# Vivado log messages
+# ---------------------------------------------------------------------------
+
+# How each curated log class is graded. Note that the two blockers are both
+# plain WARNINGs in Vivado's own severity scheme -- grading on severity alone
+# would miss exactly the messages worth acting on.
+_LOG_CLASS_RULES = {
+    "CONSTRAINT_NOT_APPLIED": {
+        "blocks_bringup": True, "blocks_signoff": True,
+        "risk": "有 constraint 指向不存在的物件，所以那一行完全沒有生效。"
+                "XDC 有被讀進來，但實際套用的約束比你寫的少 —— "
+                "後面所有的 timing 數字都是在一組不完整的約束下算出來的。",
+        "action": "依訊息中的物件名稱檢查該條 constraint："
+                  "通常是 port/cell 名稱打錯，或 RTL 改名後 XDC 沒跟著改。",
+    },
+    "UNBOUND_MODULE": {
+        "blocks_bringup": True, "blocks_signoff": True,
+        "risk": "有模組沒有對應的定義，被當成黑盒子處理。"
+                "合成出來的電路缺少這部分功能，實機上不會照預期運作。",
+        "action": "確認該模組的檔案有加進 fileset／file list；"
+                  "若是 IP，確認 output products 已產生。",
+    },
+    "INFERRED_LATCH": {
+        "blocks_signoff": True,
+        "risk": "合成器推論出 latch，通常代表 combinational always/process "
+                "區塊沒有涵蓋所有分支。latch 對時序分析與實機穩定性都不友善，"
+                "而且多半不是設計者的本意。",
+        "action": "補齊該區塊的 else／default 分支，或改用正確的 flip-flop 描述。",
+    },
+    "UNDRIVEN_NET": {
+        "blocks_signoff": True,
+        "risk": "訊號沒有驅動源或有多個驅動源。前者會被最佳化成常數，"
+                "後者行為未定義 —— 兩者都代表電路與你的預期不同。",
+        "action": "檢查該訊號的連接；未使用的輸出可以明確接地或標註。",
+    },
+    "WIDTH_MISMATCH": {
+        "risk": "位寬不匹配會造成資料被截斷或補零，是常見的靜默功能錯誤。",
+        "action": "確認兩端的位寬宣告是否一致。",
+    },
+    "PLACEMENT_QUALITY": {
+        "risk": "佈局或繞線品質不佳，通常伴隨壅塞，會讓時序結果不穩定。",
+        "action": "檢視該區域的資源使用率與 floorplan。",
+    },
+}
+
+
+def _evaluate_logs(logs):
+    """Grade the curated message classes found in the Vivado logs."""
+    findings = []
+    if not logs or not logs.get("available"):
+        return findings
+
+    try:
+        from vivado_log import by_risk_class
+    except ImportError:
+        return findings
+
+    for key, entry in sorted(by_risk_class(logs).items()):
+        rule = _LOG_CLASS_RULES.get(key)
+        if rule is None:
+            continue
+        findings.append(finding(
+            "LOG.{0}".format(key),
+            "{0}（{1} 則訊息）".format(entry["label"], entry["count"]),
+            rule["risk"], rule["action"],
+            blocks_bringup=rule.get("blocks_bringup", False),
+            blocks_signoff=rule.get("blocks_signoff", False),
+            evidence={"message_ids": entry["ids"][:6], "count": entry["count"],
+                      "severity": entry["severity"],
+                      "examples": entry["examples"]},
+            source="vivado log"))
+
+    # Anything Vivado itself called an ERROR is a blocker regardless of class.
+    errors = [m for m in logs.get("messages") or [] if m["severity"] == "ERROR"]
+    if errors:
+        findings.append(finding(
+            "LOG.ERROR",
+            "Vivado log 中有 {0} 類 ERROR 訊息".format(len(errors)),
+            "Vivado 自己判定為 ERROR 的訊息，代表該步驟並未正確完成。",
+            "依訊息內容修正後重跑。",
+            blocks_bringup=True, blocks_signoff=True,
+            evidence={"message_ids": [m["id"] for m in errors][:8],
+                      "examples": [m["examples"][0] for m in errors[:3]
+                                   if m["examples"]]},
+            source="vivado log"))
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Static file list checks
+# ---------------------------------------------------------------------------
+
+def _evaluate_filelist(result):
+    findings = []
+    if not result or not result.get("available"):
+        return findings
+
+    missing = result.get("missing_files") or []
+    if missing:
+        findings.append(finding(
+            "FILELIST.MISSING_FILE",
+            "file list 引用了 {0} 個不存在的檔案".format(len(missing)),
+            "清單裡指名的設計檔在磁碟上找不到。合成不是直接失敗，"
+            "就是在缺少這些檔案的情況下完成 —— 後者更危險，"
+            "因為結果看起來是成功的。",
+            "確認檔案路徑是否正確，或該檔是否已被移動／刪除但清單沒更新。",
+            blocks_bringup=True, blocks_signoff=True,
+            evidence={"files": missing[:10], "count": len(missing)},
+            source="file list"))
+
+    missing_incdirs = result.get("missing_incdirs") or []
+    if missing_incdirs:
+        findings.append(finding(
+            "FILELIST.MISSING_INCDIR",
+            "{0} 個 include 目錄不存在".format(len(missing_incdirs)),
+            "`+incdir+` 指向的目錄不存在，該路徑下的 header 會找不到，"
+            "造成編譯錯誤或用到別處的同名檔案。",
+            "確認 include 路徑設定。",
+            blocks_bringup=True, blocks_signoff=True,
+            evidence={"dirs": missing_incdirs[:10]},
+            source="file list"))
+
+    for error in (result.get("parse_errors") or [])[:5]:
+        findings.append(finding(
+            "FILELIST.PARSE_ERROR", "file list 解析問題：{0}".format(error),
+            "清單本身無法完整讀取，因此這項檢查沒有涵蓋全部檔案。",
+            "確認清單路徑與格式。",
+            blocks_signoff=True, evidence={"error": error}, source="file list"))
+
+    reconciliation = result.get("reconcile")
+    if reconciliation and not reconciliation["consistent"]:
+        only_list = reconciliation["only_in_filelist"]
+        only_project = reconciliation["only_in_project"]
+        findings.append(finding(
+            "FILELIST.PROJECT_MISMATCH",
+            "file list 與 .xpr 專案不一致（清單獨有 {0}，專案獨有 {1}）".format(
+                len(only_list), len(only_project)),
+            "兩份清單不同步，代表你以為在合成的檔案集合，與 Vivado 實際使用的"
+            "不是同一組。這正是「改了檔案卻沒生效」最常見的來源。",
+            "以其中一份為準並同步另一份；長期而言建議由 file list 自動產生專案。",
+            blocks_bringup=True, blocks_signoff=True,
+            evidence={"only_in_filelist": only_list[:8],
+                      "only_in_project": only_project[:8]},
+            source="file list"))
+
+    duplicates = result.get("duplicate_modules") or {}
+    if duplicates:
+        findings.append(finding(
+            "FILELIST.DUPLICATE_MODULE",
+            "{0} 個模組名稱在多個檔案中重複定義".format(len(duplicates)),
+            "同名模組定義在多個檔案時，實際採用哪一份取決於讀取順序，"
+            "換一台機器或改一次清單順序就可能編到不同的版本。",
+            "移除重複定義，或確認是否為刻意的多版本實作。",
+            blocks_signoff=True,
+            evidence={"modules": sorted(duplicates)[:8]},
+            source="file list"))
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Environment baseline
+# ---------------------------------------------------------------------------
+
+def _evaluate_environment(comparison, environment):
+    findings = []
+
+    if comparison and comparison.get("vivado_changed"):
+        change = next((c for c in comparison.get("changes") or []
+                       if c["field"] == "vivado.version"), {})
+        findings.append(finding(
+            "ENV.VIVADO_CHANGED",
+            "Vivado 版本已改變（{0} → {1}）".format(
+                change.get("from", "?"), change.get("to", "?")),
+            "換了工具版本，之前累積的結果就不再可比：timing 趨勢跨版本沒有意義，"
+            "IP 可能需要重新產生，合成與佈局的演算法也不同。"
+            "在確認之前，不應假設舊的驗證結論仍然成立。",
+            "確認 IP 是否需要 upgrade，並重新建立一次基準；"
+            "歷史趨勢請以版本切換點為界分開看。",
+            blocks_signoff=True,
+            evidence={"from": change.get("from"), "to": change.get("to")},
+            source="environment"))
+
+    for change in (comparison or {}).get("changes") or []:
+        if change["field"].startswith("os."):
+            findings.append(finding(
+                "ENV.OS_CHANGED",
+                "OS 已改變（{0}：{1} → {2}）".format(
+                    change["field"], change["from"], change["to"]),
+                "作業系統改變可能影響工具行為與函式庫版本。",
+                "確認新環境上的結果與舊環境一致。",
+                evidence=change, source="environment"))
+            break
+
+    operating = (environment or {}).get("os") or {}
+    if operating.get("supported_by_vivado_2024_2") is False:
+        findings.append(finding(
+            "ENV.OS_UNSUPPORTED",
+            "OS 不在 Vivado 2024.2 的支援清單內：{0}".format(
+                operating.get("pretty_name") or operating.get("id")),
+            "在未支援的平台上執行通常可以運作，但遇到問題時沒有官方支援，"
+            "且可能出現只在此平台發生的異常。sign-off 時應明確記錄這件事。",
+            "若可行，改用 RHEL 8/9 或 Ubuntu 20.04/22.04。",
+            evidence={"os": operating.get("pretty_name"),
+                      "id": operating.get("id"),
+                      "version": operating.get("version_id")},
+            source="environment"))
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# IP status, QoR, bitstream
+# ---------------------------------------------------------------------------
+
+def _evaluate_ip_status(ip):
+    findings = []
+    if not ip or not ip.get("available"):
+        return findings
+
+    missing = ip.get("missing_products") or []
+    if missing:
+        findings.append(finding(
+            "IP.MISSING_PRODUCTS",
+            "{0} 個 IP 的 output products 缺失或找不到定義".format(len(missing)),
+            "IP 沒有可用的實作產物，合成時會被當成黑盒子或直接失敗。"
+            "若僥倖跑完，電路中缺的就是這個 IP 的功能。",
+            "對這些 IP 執行 generate_target 或 synth_ip 重新產生 output products。",
+            blocks_bringup=True, blocks_signoff=True,
+            evidence={"ips": missing[:10], "count": len(missing)},
+            source="report_ip_status"))
+
+    upgrade = ip.get("needs_upgrade") or []
+    if upgrade:
+        findings.append(finding(
+            "IP.NEEDS_UPGRADE",
+            "{0} 個 IP 需要升級".format(len(upgrade)),
+            "IP 是用較舊版本的 Vivado 產生的。它通常還是能用，但你合成進去的"
+            "是舊版本的實作，與目前工具版本的行為可能有差異，"
+            "也拿不到後續版本修掉的問題。",
+            "執行 upgrade_ip 後重新產生 output products 並重跑。",
+            blocks_signoff=True,
+            evidence={"ips": upgrade[:10], "count": len(upgrade)},
+            source="report_ip_status"))
+
+    locked = ip.get("locked") or []
+    if locked:
+        findings.append(finding(
+            "IP.LOCKED",
+            "{0} 個 IP 處於 locked 狀態".format(len(locked)),
+            "被 lock 的 IP 不會隨專案設定重新產生，可能與目前的設計參數不一致。",
+            "確認 lock 是否為刻意；否則解除後重新產生。",
+            blocks_signoff=True,
+            evidence={"ips": locked[:10]}, source="report_ip_status"))
+
+    return findings
+
+
+def _evaluate_qor(qor, thresholds):
+    findings = []
+    if not qor or not qor.get("available"):
+        return findings
+
+    score = qor.get("score")
+    if score is None:
+        return findings
+    if score < thresholds["qor_score_warn"]:
+        findings.append(finding(
+            "QOR.LOW_SCORE",
+            "Vivado QoR 評分偏低：{0}/{1}".format(score, qor.get("max_score", 5)),
+            "Vivado 自己評估這個設計的實作品質偏低，通常伴隨壅塞、"
+            "時序餘裕不足或不良的設計結構，結果的可重複性會比較差。",
+            "參考 report_qor_suggestions 的建議項目。",
+            evidence={"score": score}, source="report_qor_assessment"))
+    return findings
+
+
+def _evaluate_bitstream(bitstream):
+    findings = []
+    if not bitstream or not bitstream.get("requested"):
+        return findings
+    if not bitstream.get("exists"):
+        findings.append(finding(
+            "BITSTREAM.MISSING",
+            "要求產生 bitstream，但檔案不存在",
+            "write_bitstream 沒有成功產出檔案。最常見的原因是被 DRC 擋下"
+            "（例如 NSTD-1／UCIO-1），這種情況下上面的 DRC 項目會指出實際原因。",
+            "先解決 DRC 問題再重跑；不要用 -force 略過。",
+            blocks_bringup=True, blocks_signoff=True,
+            evidence={"expected_path": bitstream.get("path")},
+            source="write_bitstream"))
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def evaluate(timing=None, reports=None, manifest=None, preflight=None,
-             thresholds=None, requested_reports=None):
-    """Produce the full graded finding list plus the two headline verdicts."""
+             thresholds=None, requested_reports=None, stage_kind="impl",
+             logs=None, filelist=None, environment=None,
+             environment_comparison=None, bitstream=None, waiver_data=None):
+    """Produce the full graded finding list plus the two headline verdicts.
+
+    ``stage_kind`` is ``"synth"`` or ``"impl"`` and shifts how the timing and
+    utilization numbers are graded, because post-synthesis values are
+    pre-placement estimates rather than results.
+    """
     merged = dict(DEFAULT_THRESHOLDS)
     if thresholds:
         merged.update(thresholds)
     reports = reports or {}
 
     findings = []
-    findings.extend(_evaluate_timing(timing, merged))
+    findings.extend(_evaluate_environment(environment_comparison, environment))
+    findings.extend(_evaluate_filelist(filelist))
+    findings.extend(_evaluate_logs(logs))
+    findings.extend(_evaluate_timing(timing, merged, stage_kind))
     findings.extend(_evaluate_cdc(reports.get("cdc")))
     findings.extend(_evaluate_clock_interaction(reports.get("clock_interaction")))
     findings.extend(_evaluate_drc(reports.get("drc")))
     findings.extend(_evaluate_methodology(reports.get("methodology")))
     findings.extend(_evaluate_utilization(reports.get("utilization"),
-                                          reports.get("control_sets"), merged))
+                                          reports.get("control_sets"), merged,
+                                          stage_kind))
+    findings.extend(_evaluate_ip_status(reports.get("ip_status")))
+    findings.extend(_evaluate_qor(reports.get("qor_assessment"), merged))
+    findings.extend(_evaluate_bitstream(bitstream))
     findings.extend(_evaluate_provenance(manifest, preflight))
     findings.extend(_evaluate_coverage(reports, requested_reports))
+
+    waiver_result = {"applied": [], "expired": []}
+    try:
+        from waivers import apply_waivers
+        waiver_result = apply_waivers(findings, waiver_data)
+        findings = waiver_result["findings"]
+    except ImportError:
+        pass
 
     findings.sort(key=lambda item: (SEVERITY_ORDER.index(item["severity"]),
                                     item["id"]))
     return {"findings": findings, "verdict": summarise(findings),
-            "thresholds": merged}
+            "thresholds": merged, "stage_kind": stage_kind,
+            "waivers": {"applied": waiver_result.get("applied", []),
+                        "expired": waiver_result.get("expired", [])}}
+
+
+def dedupe_findings(findings):
+    """Drop repeats of the same finding seen in more than one stage.
+
+    Some checks are properties of the flow, not of a stage: the file list, the
+    environment baseline and a shared session log are evaluated identically
+    whichever stage is being analysed. Listing them once per stage would
+    overstate how much is wrong. The first occurrence wins, so the earliest
+    stage that could have caught it is the one credited.
+    """
+    seen = set()
+    unique = []
+    for item in findings:
+        key = (item.get("id"), item.get("title"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
 
 
 def summarise(findings):
-    """Counts plus the bring-up / sign-off verdicts derived from them."""
+    """Counts plus the bring-up / sign-off verdicts derived from them.
+
+    A waived finding keeps its severity in the counts -- the accepted risk is
+    still real and still shown -- but no longer gates either verdict.
+    """
     counts = dict((severity, 0) for severity in SEVERITY_ORDER)
     for item in findings:
         counts[item["severity"]] = counts.get(item["severity"], 0) + 1
 
     bringup_blockers = [f for f in findings if f["blocks_bringup"]]
     signoff_blockers = [f for f in findings if f["blocks_signoff"]]
+    waived = [f for f in findings if f.get("waived")]
 
     return {
         "counts": counts,
         "blockers": counts[BLOCKER],
         "criticals": counts[CRITICAL],
+        "waived": len(waived),
         "bringup_ok": not bringup_blockers,
         "signoff_ok": not signoff_blockers,
         "bringup_blocker_count": len(bringup_blockers),

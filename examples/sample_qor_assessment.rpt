@@ -1,0 +1,27 @@
+Copyright 1986-2024 Advanced Micro Devices, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2024.2 (lin64) Build 5239630 Fri Nov 08 22:34:34 MST 2024
+| Date         : Mon Jul 28 10:15:40 2025
+| Host         : fpga-ws01
+| Command      : report_qor_assessment -file timing_analysis/raw/qor_assessment_impl_1.rpt
+| Design       : top
+| Device       : xc7k325tffg900-2
+------------------------------------------------------------------------------------
+
+QoR Assessment Report
+
+1. QoR Assessment Summary
+-------------------------
+
+QoR Assessment Score: 2
+
+A score of 1-2 indicates the design is unlikely to meet timing without
+significant changes. See report_qor_suggestions for specific actions.
+
++------------------------------+--------+
+| Category                     | Score  |
++------------------------------+--------+
+| Utilization                  | 2      |
+| Congestion                   | 2      |
+| Timing                       | 3      |
++------------------------------+--------+

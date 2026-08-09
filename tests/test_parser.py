@@ -26,9 +26,9 @@ class TestParseSummary(unittest.TestCase):
     def test_metadata(self):
         meta = self.parsed["meta"]
         self.assertEqual(meta["design"], "top")
-        self.assertEqual(meta["device"], "7k325t-ffg900")
+        self.assertEqual(meta["device"], "xc7k325tffg900-2")
         self.assertEqual(meta["design_state"], "Routed")
-        self.assertIn("2021.2", meta["tool_version"])
+        self.assertIn("2024.2", meta["tool_version"])
 
     def test_design_timing_summary(self):
         summary = self.parsed["summary"]

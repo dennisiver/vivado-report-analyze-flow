@@ -3,8 +3,9 @@
 """Parse a Vivado ``report_timing_summary`` text report into a compact dict.
 
 Standard library only, written for Python 3.4+ so it runs on an offline
-RHEL 6.9 workstation with either a system ``python3`` or the interpreter
-bundled with Vivado (``$XILINX_VIVADO/tps/lnx64/python-3*/bin/python3``).
+workstation with either a system ``python3`` or the interpreter bundled with
+Vivado (``$XILINX_VIVADO/tps/lnx64/python-3*/bin/python3``). The workstation OS
+is not assumed; it is detected and recorded at run time by environment.py.
 
 The point of this module is data reduction: a routed ``report_timing_summary``
 is routinely tens of thousands of lines, and feeding it to a local LLM blows up

@@ -1,0 +1,47 @@
+# =============================================================================
+# 複製成 config.mk 後填入你的專案路徑：
+#
+#     cp config.mk.example config.mk
+#
+# 路徑可以是相對於你執行 make 的目錄，也可以是絕對路徑。
+# config.mk 屬於個別專案的設定，不需要 commit 進這個工具的 repo。
+# =============================================================================
+
+# --- 必填 --------------------------------------------------------------------
+
+# Vivado 專案檔
+PROJECT   = build/top.xpr
+
+# 要稽核的 RTL 目錄（可多個，用空白分隔）
+RTL_DIRS  = rtl
+
+# 要稽核的 XDC 目錄（可多個）
+XDC_DIRS  = constrs
+
+# --- 選填 --------------------------------------------------------------------
+
+# 外部 file list（.f / .tcl / .txt，可多個）。
+# 設了才會執行 `make check-files`，並與 .xpr 對帳。
+FILELIST  = filelist.f
+
+# 分析輸出目錄
+OUTDIR    = timing_analysis
+
+# RTL 的 git working tree，用來記錄 commit
+REPO_ROOT = .
+
+# 要建置的 implementation run 名稱
+RUN       = impl_1
+
+# launch_runs 的平行數
+JOBS      = 4
+
+# 已核准豁免項目的檔案；不存在就直接忽略
+WAIVERS   = waivers.json
+
+# 稽核時要略過的檔案（glob，可多個），例如 testbench
+# EXCLUDE = */tb/* */sim/*
+
+# 若 vivado 或 python3 不在 PATH 上，在這裡指定完整路徑
+# VIVADO = /tools/Xilinx/Vivado/2024.2/bin/vivado
+# PYTHON = /tools/Xilinx/Vivado/2024.2/tps/lnx64/python-3.10.6/bin/python3

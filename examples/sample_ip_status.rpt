@@ -1,0 +1,20 @@
+Copyright 1986-2024 Advanced Micro Devices, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2024.2 (lin64) Build 5239630 Fri Nov 08 22:34:34 MST 2024
+| Date         : Mon Jul 28 10:15:35 2025
+| Host         : fpga-ws01
+| Command      : report_ip_status -file timing_analysis/raw/ip_status_impl_1.rpt
+| Design       : top
+| Device       : xc7k325tffg900-2
+------------------------------------------------------------------------------------
+
+IP Status Report
+
++---------------------+----------------------+------------------------------------+---------------------------------+
+| IP Name             | IP Version           | Status                             | Recommendation                  |
++---------------------+----------------------+------------------------------------+---------------------------------+
+| u_clk_wiz           | clk_wiz v6.0         | Up to date                         | No action required              |
+| u_fifo_rx           | fifo_generator v13.2 | IP revision change, needs upgrade  | Run upgrade_ip                  |
+| u_axi_bram          | axi_bram_ctrl v4.1   | Output products not generated      | Run generate_target all         |
+| u_mig               | mig_7series v4.2     | Locked                             | Review lock before regenerating |
++---------------------+----------------------+------------------------------------+---------------------------------+

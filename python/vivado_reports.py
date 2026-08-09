@@ -47,7 +47,7 @@ def _guard(path, parse):
             os.path.basename(path), error))
     if result is None:
         return _unavailable(
-            "unrecognised format in {0} (expected Vivado 2021.2 layout)".format(
+            "unrecognised format in {0} (expected Vivado 2024.2 layout)".format(
                 os.path.basename(path)))
     result["available"] = True
     result["source"] = path
@@ -281,6 +281,100 @@ def parse_control_sets(path):
 
 
 # ---------------------------------------------------------------------------
+# report_ip_status
+# ---------------------------------------------------------------------------
+
+# Status wording varies; these are the substrings that mean "this IP is not
+# what your RTL expects any more".
+_IP_NEEDS_UPGRADE = ("upgrade", "out-of-date", "out of date", "re-customize",
+                     "older version", "obsolete")
+_IP_MISSING_PRODUCTS = ("output products", "not generated", "missing",
+                        "no output", "definition not found", "not found")
+_IP_LOCKED = ("locked",)
+
+
+def _parse_ip_status(text):
+    tables = parse_all_tables(text)
+    table = (find_table(tables, ["IP Name", "Status"])
+             or find_table(tables, ["IP", "Status"])
+             or find_table(tables, ["Name", "Status"]))
+    if table is None:
+        # A project with no IP is a legitimate clean result.
+        if re.search(r"has no IP|No IP found|0 IP", text, re.IGNORECASE):
+            return {"ips": [], "needs_upgrade": [], "locked": [],
+                    "missing_products": []}
+        return None
+
+    name_key = None
+    for candidate in ("ip_name", "ip", "name"):
+        if any(candidate in row for row in table["rows"]):
+            name_key = candidate
+            break
+
+    ips = []
+    needs_upgrade = []
+    locked = []
+    missing_products = []
+    for row in table["rows"]:
+        name = (row.get(name_key) or "").strip() if name_key else ""
+        status = (row.get("status") or "").strip()
+        if not name:
+            continue
+        record = {"name": name, "status": status,
+                  "recommendation": (row.get("recommendation") or "").strip()}
+        ips.append(record)
+
+        lowered = (status + " " + record["recommendation"]).lower()
+        if any(token in lowered for token in _IP_MISSING_PRODUCTS):
+            missing_products.append(name)
+        elif any(token in lowered for token in _IP_NEEDS_UPGRADE):
+            needs_upgrade.append(name)
+        if any(token in lowered for token in _IP_LOCKED):
+            locked.append(name)
+
+    if not ips:
+        return None
+    return {"ips": ips, "needs_upgrade": needs_upgrade, "locked": locked,
+            "missing_products": missing_products}
+
+
+def parse_ip_status(path):
+    return _guard(path, _parse_ip_status)
+
+
+# ---------------------------------------------------------------------------
+# report_qor_assessment
+# ---------------------------------------------------------------------------
+
+_QOR_SCORE = re.compile(
+    r"QoR\s+Assessment\s+Score\s*[:|]?\s*(\d+)", re.IGNORECASE)
+
+
+def _parse_qor_assessment(text):
+    match = _QOR_SCORE.search(text)
+    score = int(match.group(1)) if match else None
+
+    if score is None:
+        for table in parse_all_tables(text):
+            for row in table["rows"]:
+                cells = row.get("_cells") or []
+                for index, cell in enumerate(cells[:-1]):
+                    if "assessment score" in cell.lower():
+                        score = to_int(cells[index + 1])
+                        break
+            if score is not None:
+                break
+
+    if score is None:
+        return None
+    return {"score": score, "max_score": 5}
+
+
+def parse_qor_assessment(path):
+    return _guard(path, _parse_qor_assessment)
+
+
+# ---------------------------------------------------------------------------
 
 PARSERS = {
     "utilization": parse_utilization,
@@ -289,6 +383,8 @@ PARSERS = {
     "cdc": parse_cdc,
     "clock_interaction": parse_clock_interaction,
     "control_sets": parse_control_sets,
+    "ip_status": parse_ip_status,
+    "qor_assessment": parse_qor_assessment,
 }
 
 # Human-facing names, used when telling the user what was not checked.
@@ -299,6 +395,8 @@ REPORT_LABELS = {
     "cdc": "CDC（跨時脈域）",
     "clock_interaction": "Clock Interaction（時脈交互作用）",
     "control_sets": "Control Sets",
+    "ip_status": "IP Status（IP 是否為最新）",
+    "qor_assessment": "QoR Assessment（Vivado 品質評分）",
 }
 
 

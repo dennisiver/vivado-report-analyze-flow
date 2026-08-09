@@ -1,0 +1,16 @@
+#-----------------------------------------------------------
+# Vivado v2024.2 (64-bit)
+# Start of session at: Mon Jul 28 09:40:11 2025
+#-----------------------------------------------------------
+INFO: [Vivado 12-14203] Executing synth_design
+INFO: [Synth 8-6157] synthesizing module 'top'
+WARNING: [Synth 8-327] inferring latch for variable 'state_reg'
+WARNING: [Synth 8-327] inferring latch for variable 'mode_reg'
+INFO: [Synth 8-6155] done synthesizing module 'top'
+WARNING: [Synth 8-3848] Net u_io/rx_unused in module top does not have driver
+WARNING: [Synth 8-6014] Unused sequential element cnt_reg was removed
+CRITICAL WARNING: [Synth 8-3332] Sequential element u_core/tmp_reg is unused and will be removed
+WARNING: [Vivado 12-507] No objects matched 'get_ports pcie_refclk_p'
+WARNING: [Vivado 12-507] No objects matched 'get_cells u_old_name/*'
+INFO: [Common 17-83] Releasing license: Synthesis
+INFO: [Common 17-206] Exiting Vivado at Mon Jul 28 10:02:44 2025

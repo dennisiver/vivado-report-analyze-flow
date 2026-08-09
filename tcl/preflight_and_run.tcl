@@ -129,11 +129,15 @@ array set opts {
     repo_root         ""
     python            ""
     reports           ""
+    waivers           ""
     jobs              4
     check_only        0
     no_reset          0
     warn_missing_rtl  0
     fail_on_blocker   0
+    analyze_synth     1
+    stop_on_synth     0
+    write_bitstream   0
 }
 set opts(rtl_dirs) {}
 set opts(xdc_dirs) {}
@@ -152,10 +156,14 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
         -xdc-dir          { lappend opts(xdc_dirs) [lindex $argv [incr i]] }
         -exclude          { lappend opts(exclude)  [lindex $argv [incr i]] }
         -reports          { set opts(reports)   [lindex $argv [incr i]] }
+        -waivers          { set opts(waivers)   [lindex $argv [incr i]] }
         -check-only       { set opts(check_only) 1 }
         -no-reset         { set opts(no_reset) 1 }
         -warn-missing-rtl { set opts(warn_missing_rtl) 1 }
         -fail-on-blocker  { set opts(fail_on_blocker) 1 }
+        -no-synth-analysis { set opts(analyze_synth) 0 }
+        -stop-on-synth-blocker { set opts(stop_on_synth) 1 }
+        -write-bitstream  { set opts(write_bitstream) 1 }
         default {
             puts "ERROR: unknown option '$flag'"
             exit 2
@@ -425,10 +433,88 @@ if {$force_reset} {
     ::vra::info_line "inputs changed since the last tracked run -- forcing a clean rebuild"
 }
 
+# Analysing a completed run: open it, report on it, hand the reports and the
+# run's own log to the analyser. Returns the number of BLOCKER findings.
+proc ::vra::analyze_stage {run_name outdir python stage_kind preflight_json
+                           reports waivers {bitstream ""}} {
+    if {[llength [get_designs -quiet]]} {
+        close_design
+    }
+    ::vra::info_line "opening completed run '$run_name' for analysis"
+    open_run $run_name
+
+    set logs {}
+    set directory [get_property -quiet DIRECTORY [get_runs $run_name]]
+    if {$directory ne ""} {
+        foreach name {runme.log vivado.log} {
+            set candidate [file join $directory $name]
+            if {[file isfile $candidate]} {
+                lappend logs $candidate
+            }
+        }
+    }
+    set session [file normalize vivado.log]
+    if {[file isfile $session]} {
+        lappend logs $session
+    }
+
+    set options [list \
+        -stage $run_name \
+        -outdir $outdir \
+        -python $python \
+        -stage-kind $stage_kind \
+        -preflight $preflight_json \
+        -logs $logs]
+    if {$reports ne ""} {
+        lappend options -reports $reports
+    }
+    if {$waivers ne ""} {
+        lappend options -waivers $waivers
+    }
+    if {$bitstream ne ""} {
+        lappend options -bitstream $bitstream
+    }
+
+    ::vra::run_timing_report_and_analyze {*}$options
+    return $::vra::blockers
+}
+
+set analysed_stages {}
+
 if {$parent_run ne ""} {
     ::vra::ensure_run $parent_run $opts(jobs) $force_reset
+
+    # Analysing synthesis before implementation starts is what makes the early
+    # exit possible: constraint problems are already settled at this point and
+    # place & route will not improve them.
+    if {$opts(analyze_synth)} {
+        set synth_blockers [::vra::analyze_stage $parent_run $outdir $python \
+            synth $preflight_json $opts(reports) $opts(waivers)]
+        lappend analysed_stages $parent_run
+
+        if {$synth_blockers > 0} {
+            puts ""
+            puts " ⚠ synthesis 階段有 $synth_blockers 項 BLOCKER。"
+            if {$opts(stop_on_synth)} {
+                puts " -stop-on-synth-blocker 已啟用，不進入 implementation。"
+                puts " 詳見 [file join $outdir latest_${parent_run}.md]"
+                exit 1
+            }
+            puts " 仍會繼續執行 implementation（加 -stop-on-synth-blocker 可在此中止）。"
+        }
+    }
 }
+
 ::vra::ensure_run $run_name $opts(jobs) $force_reset
+
+if {$opts(write_bitstream)} {
+    ::vra::info_line "extending '$run_name' to write_bitstream"
+    if {[catch {launch_runs $run_name -to_step write_bitstream -jobs $opts(jobs)} msg]} {
+        ::vra::warn "write_bitstream launch failed: $msg"
+    } else {
+        wait_on_run $run_name
+    }
+}
 
 # -----------------------------------------------------------------------------
 # 6. Report and summarise
@@ -438,27 +524,40 @@ if {$parent_run ne ""} {
 # are compared against.
 ::vra::manifest_step $python $manifest_args 1
 
-::vra::info_line "opening completed run '$run_name'"
-if {[llength [get_designs -quiet]]} {
-    close_design
+set bitstream_path ""
+if {$opts(write_bitstream)} {
+    set directory [get_property -quiet DIRECTORY [get_runs $run_name]]
+    set top [get_property -quiet TOP [current_fileset]]
+    if {$directory ne "" && $top ne ""} {
+        set bitstream_path [file join $directory "${top}.bit"]
+    }
 }
-open_run $run_name
 
-set analyze_options [list \
-    -stage $run_name \
-    -outdir $outdir \
-    -python $python \
-    -preflight $preflight_json]
-if {$opts(reports) ne ""} {
-    lappend analyze_options -reports $opts(reports)
+::vra::analyze_stage $run_name $outdir $python impl $preflight_json \
+    $opts(reports) $opts(waivers) $bitstream_path
+lappend analysed_stages $run_name
+
+set summary [file join $outdir "latest_${run_name}.md"]
+
+# Roll the stages up so the agent has one entry point rather than one file per
+# stage to hunt through.
+if {[llength $analysed_stages] > 1} {
+    set overview_args [list --outdir $outdir --stages]
+    foreach stage $analysed_stages {
+        lappend overview_args $stage
+    }
+    catch {::vra::run_python $python flow_summary.py {*}$overview_args}
 }
-set summary [::vra::run_timing_report_and_analyze {*}$analyze_options]
 
 puts ""
 puts "==================================================================="
-puts " Done. Read this file (and only this file) for the timing result:"
+puts " Done. 給 AI agent 讀的檔案："
+if {[llength $analysed_stages] > 1} {
+    puts "   [file join $outdir latest_flow.md]  <- 總覽，先讀這份"
+}
 puts "   $summary"
-puts "   Risk report: [file join $outdir risk_${run_name}.md]"
+puts " 完整風險說明： [file join $outdir risk_${run_name}.md]"
+puts " 人類簽核報告： make signoff（或 python3 python/signoff_report.py）"
 puts "==================================================================="
 
 # The build itself succeeded, so the default exit status stays 0. Gating on

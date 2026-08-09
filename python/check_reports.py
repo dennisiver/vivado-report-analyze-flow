@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Check this flow's parsers against the reports your Vivado actually produced.
 
-The parsers were written against the documented Vivado 2021.2 layouts. Real
+The parsers were written against the documented Vivado 2024.2 layouts. Real
 projects can differ, so this tool runs every parser over a directory of real
 reports and prints what each one extracted, letting you compare against the
 ``.rpt`` yourself without sending the design anywhere.
@@ -26,6 +26,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import risk_rules as risk_mod             # noqa: E402
+import vivado_log as log_mod              # noqa: E402
 import vivado_report_parser as timing_mod  # noqa: E402
 import vivado_reports as reports_mod      # noqa: E402
 
@@ -111,6 +112,16 @@ def _describe(kind, result):
     elif kind == "control_sets":
         facts.append("unique control sets: {0}".format(
             result.get("unique_control_sets")))
+    elif kind == "ip_status":
+        facts.append("{0} IP; upgrade={1} locked={2} missing products={3}".format(
+            len(result.get("ips") or []), len(result.get("needs_upgrade") or []),
+            len(result.get("locked") or []),
+            len(result.get("missing_products") or [])))
+        for ip in (result.get("ips") or [])[:15]:
+            facts.append("{0:<22} {1}".format(ip["name"], ip["status"][:50]))
+    elif kind == "qor_assessment":
+        facts.append("QoR score: {0}/{1}".format(
+            result.get("score"), result.get("max_score")))
     return facts
 
 
@@ -209,13 +220,42 @@ def main(argv=None):
                 for line in _fingerprint(path):
                     print("  " + line)
 
+    # Logs are where constraint failures and inferred latches show up, and the
+    # curated message table is the part most likely to need tuning against a
+    # real Vivado release -- so it gets the same treatment as the reports.
+    print("")
+    print("=" * 72)
+    print("vivado logs")
+    print("=" * 72)
+    log_paths = sorted(os.path.join(args.dir, name)
+                       for name in os.listdir(args.dir)
+                       if name.endswith(".log"))
+    logs = None
+    if not log_paths:
+        print("  no .log files in {0}".format(args.dir))
+        print("  (pass the run's runme.log through --log when analysing, or "
+              "copy it here to check the message table)")
+    else:
+        logs = log_mod.parse_logs(log_paths)
+        print("  parsed {0} log(s): {1}".format(
+            len(logs["sources"]), logs["counts"]))
+        grouped = log_mod.by_risk_class(logs)
+        if grouped:
+            for key, entry in sorted(grouped.items()):
+                print("    {0:<24} {1:<4} {2}".format(
+                    key, entry["count"], entry["label"]))
+        else:
+            print("    no curated high-risk messages matched")
+            print("    (if you expected one, paste the log line so the table "
+                  "can be extended)")
+
     print("")
     print("=" * 72)
     print("risk assessment")
     print("=" * 72)
     reports = reports_mod.parse_reports(report_paths)
     assessment = risk_mod.evaluate(
-        timing=timing, reports=reports,
+        timing=timing, reports=reports, logs=logs,
         requested_reports=set(k for k, v in report_paths.items() if v))
     verdict = assessment["verdict"]
     print("  bring-up: {0}   sign-off: {1}".format(
