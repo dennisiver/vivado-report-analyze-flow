@@ -574,6 +574,39 @@ python3 $FLOW/python/analyze_run.py \
 
 ---
 
+## 給 AI 用的 Agent Skill
+
+`skills/vivado-fpga-flow/` 是這個 flow 附的 Agent Skill，
+把「怎麼跑、怎麼讀結果、怎麼判斷」封裝成 AI 可以載入的形式。
+
+**為什麼值得做成 skill**：`AGENTS.md` 的內容**每一輪都會載入**，
+即使使用者問的是完全無關的事。把 150 行 FPGA 判讀規則常駐在那裡，
+對 context 有限的本地模型是實打實的浪費。Skill 只在相關時才載入本體，
+而更深的細節（完整規則表、FPGA 修法建議）放在 `references/` 再往下一層 ——
+這正是這個 flow 對報告資料做的同一件事。
+
+安裝（Claude Code）：
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s $FLOW/skills/vivado-fpga-flow ~/.claude/skills/vivado-fpga-flow
+```
+
+用 symlink 的好處是 repo 更新時 skill 自動跟著更新。
+
+**但 skill 不能取代 AGENTS.md 的護欄。**
+「不要讀 `raw/*.rpt`」必須永遠生效 —— 等 skill 載入才知道就太遲了。
+所以是兩層：`AGENTS.md` 放十幾行的護欄，其餘全部在 skill 裡。
+細節見 [`docs/opencode-integration.md`](docs/opencode-integration.md)。
+
+**內容漂移有測試擋。** 規則改了而 skill 沒改，skill 就會開始說謊 ——
+對一份用來做安全判斷的東西，這比沒有 skill 更糟。所以 `tests/test_skill.py` 會：
+skill 提到的每個 rule ID 必須存在於 `risk_rules.py`；
+每一條會阻擋上板的規則必須在 skill 裡被提到；文件裡的閾值必須與程式一致。
+維護方式與擴充指引見 [`docs/skill-authoring.md`](docs/skill-authoring.md)。
+
+---
+
 ## 與 OpenCode / Qwen 整合
 
 見 [`docs/opencode-integration.md`](docs/opencode-integration.md)，
@@ -609,9 +642,14 @@ python/
   trend.py                   history.jsonl 讀寫與跨執行比較
   analyze_run.py             CLI 入口，串起上述所有模組
   check_reports.py           自我檢查：對真實報告驗證各 parser
+skills/vivado-fpga-flow/     Agent Skill（給 AI 用的操作與判讀指引）
+  SKILL.md                   本體
+  references/*.md            規則表、階段細節、FPGA 判讀，需要才載入
 examples/                    各報告與 log 的手刻範例
 tests/                       單元測試 + 假 Vivado 的情境測試
-docs/opencode-integration.md 給 Qwen 的 AGENTS.md 段落與判讀指引
+docs/
+  opencode-integration.md    AGENTS.md 護欄 + 指向 skill
+  skill-authoring.md         skill 為什麼這樣做、怎麼維護、怎麼請 AI 重產
 ```
 
 要調整判定標準時，唯一需要改的是 `python/risk_rules.py` 裡的 `DEFAULT_THRESHOLDS`
@@ -642,6 +680,12 @@ make test          # 或 sh tests/run_tests.sh
   - 格式錯誤的 `waivers.json` **不得意外豁免任何項目**
 - **Makefile 測試** —— `make check-files`、`make signoff` 在沒有 Vivado 的情況下
   可完成；缺少 `config.mk` 時給出明確的中文錯誤訊息。
+- **Skill 一致性測試** —— frontmatter 合法、本體與描述有長度上限、
+  reference 檔都被引用；**rule ID 與 `risk_rules.py` 雙向對帳**
+  （skill 提到的必須存在、會阻擋上板的必須被提到）、閾值數字一致、
+  幾條關鍵事實與實際 `evaluate()` 輸出相符。
+  其中還有一條刻意模擬「多了一條沒寫進 skill 的 BLOCKER」，
+  確認這個對帳真的會失敗 —— 避免寫出永遠會通過的假測試。
 - **情境測試** —— `tests/vivado_stub.tcl` 模擬一個最小的 Vivado 專案物件模型
   （fileset、檔案屬性、run 生命週期、各 `report_*` 指令、`synth_design`、`version`），
   用 `tclsh` 驗證：漏加 XDC/RTL、constraint 被 disable 都必須在 `launch_runs`
