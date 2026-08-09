@@ -191,42 +191,143 @@ out-of-date 偵測**永遠不會觸發** —— 因為那個檔案從頭到尾�
 
 ## 安裝（離線）
 
-整包只用 Python 標準函式庫，沒有任何外部相依，直接複製到工作站即可：
+> **先講結論：這個專案沒有「安裝」這個步驟。**
+> 它就是一個資料夾，裡面全是文字檔（Python 腳本 + Tcl 腳本）。
+> **不需要 `pip install`、不需要編譯、不需要 root 權限、不需要改任何系統設定。**
+> 你只要把資料夾複製到工作站上任何讀得到的位置就結束了。
+>
+> 之所以能這樣，是因為所有程式只用 Python 內建的標準函式庫
+> （`re`、`json`、`hashlib`、`os`…），完全沒有外部套件 ——
+> 這是針對「離線、不能 pip」的環境刻意選的做法。
+
+整個過程就這四行（細節見下面各步驟）：
 
 ```bash
-scp -r vivado-report-analyze-flow user@fpga-ws:/opt/
+# 在有網路的電腦上下載，然後把資料夾複製到工作站的家目錄
+export FLOW=~/vivado-report-analyze-flow    # 記住放在哪
+cd $FLOW && sh tests/run_tests.sh           # 驗證：看到 ALL TESTS PASSED 就好了
+# 之後就可以用 $FLOW/tcl/preflight_and_run.tcl 跑你的專案
 ```
 
-### 確認 Python 3
+### 步驟 1：在有網路的電腦上取得檔案
 
-先確認以下**任一項**可用（不需要 pip 安裝任何東西）：
+任選一種：
 
 ```bash
-# 1) 系統的 python3（RHEL 6.9 內建通常只有 python 2.6，需另外確認）
-which python3 && python3 --version     # 需要 >= 3.4
+# A. 有 git 的話
+git clone https://github.com/dennisiver/vivado-report-analyze-flow.git
+```
 
-# 2) Vivado 2021.2 自帶的 Python 3 —— 離線機器上一定存在
+```
+B. 沒有 git 的話：開瀏覽器到
+   https://github.com/dennisiver/vivado-report-analyze-flow
+   按綠色的 "Code" 按鈕 → "Download ZIP"，解壓縮後得到同樣的資料夾
+```
+
+### 步驟 2：搬到離線工作站
+
+```bash
+# A. 兩台機器之間網路通得到
+scp -r vivado-report-analyze-flow  你的帳號@fpga-ws:~/
+
+# B. 完全隔離，只能用 USB：把整個資料夾複製到隨身碟，
+#    再到工作站上複製到家目錄即可
+```
+
+### 步驟 3：決定放在哪裡
+
+放哪裡都可以，只要 Vivado 執行時讀得到。兩個常見選擇：
+
+```bash
+~/vivado-report-analyze-flow        # 只有自己用，不需要 root（建議先這樣）
+/opt/vivado-report-analyze-flow     # 全機共用，需要 root 才能寫入 /opt
+```
+
+之後的指令裡會用到這個路徑，先記下來。下面統一用 `$FLOW` 代表它：
+
+```bash
+export FLOW=~/vivado-report-analyze-flow
+```
+
+> 把這行加進 `~/.bashrc`，以後每次登入就不用重打。
+
+### 步驟 4：確認有 Python 3
+
+需要 Python 3.4 以上。以下**任一項可用即可**：
+
+```bash
+# 1) 系統的 python3（RHEL 6.9 內建通常只有 python 2.6，所以要確認一下）
+which python3 && python3 --version
+
+# 2) Vivado 2021.2 自帶的 Python 3 —— 只要裝了 Vivado 就一定有
 ls $XILINX_VIVADO/tps/lnx64/python-3*/bin/python3
 ```
 
-`find_python` 會自動依序尋找上述兩者，通常不需要手動指定。若要指定，加上
-`-python <路徑>`。
+程式會自動依序去找這兩個位置，**通常你什麼都不用做**。
+兩個都找不到時才需要用 `-python <完整路徑>` 明確指定。
 
-確認方式（用你實際要用的直譯器跑一次測試）：
+> `$XILINX_VIVADO` 這個環境變數是 Vivado 的 `settings64.sh` 設定的。
+> 如果上面第 2 個指令說找不到，先執行
+> `source /tools/Xilinx/Vivado/2021.2/settings64.sh`（路徑依你的安裝位置）再試一次。
+
+### 步驟 5：驗證能正常運作
+
+這一步不需要 Vivado、不需要 licence、不會碰到你的專案：
 
 ```bash
-cd /opt/vivado-report-analyze-flow
+cd $FLOW
+sh tests/run_tests.sh
+```
+
+看到最後一行 `ALL TESTS PASSED` 就代表裝好了。
+
+如果工作站上的 `python3` 和 Vivado 內建的是不同版本，
+建議用你實際會用到的那一個再跑一次確認：
+
+```bash
 PYTHON=$XILINX_VIVADO/tps/lnx64/python-3.8.3/bin/python3 sh tests/run_tests.sh
 ```
+
+### 步驟 6：對你的專案跑第一次
+
+先用 `-check-only`，它只做檔案稽核、**不會啟動合成**，幾秒鐘就結束，
+用來確認路徑都填對了：
+
+```bash
+cd ~/我的FPGA專案
+vivado -mode batch -source $FLOW/tcl/preflight_and_run.tcl -tclargs \
+    -project   build/top.xpr \
+    -rtl-dir   rtl \
+    -xdc-dir   constrs \
+    -check-only
+```
+
+把 `build/top.xpr`、`rtl`、`constrs` 換成你專案裡實際的路徑。
+沒問題的話再拿掉 `-check-only` 跑完整流程（見下一節）。
+
+### 安裝常見問題
+
+| 症狀 | 原因與解法 |
+|---|---|
+| `bad interpreter` 或 Tcl 報奇怪的語法錯誤 | 檔案經過 Windows 中轉，換行變成 CRLF。修正：`cd $FLOW && find . -type f \( -name '*.py' -o -name '*.tcl' -o -name '*.sh' \) -exec sed -i 's/\r$//' {} +` |
+| `python3: command not found` | 回到步驟 4，改用 Vivado 內建的那一個，並在指令中加 `-python <完整路徑>` |
+| `no python3 found` | 同上。另外確認有先 `source settings64.sh` |
+| `tests/run_tests.sh: Permission denied` | 用 `sh tests/run_tests.sh` 執行（不需要 `chmod +x`）。USB 中轉常會掉執行權限，所以文件裡一律寫成 `sh ...` |
+| pre-flight 說某個 `.xdc` 不在 fileset | **這不是安裝問題，是它抓到真的問題了** —— 那個檔案確實沒被加進專案。依訊息用 `add_files` 補上 |
+| 跑 `-check-only` 說 run 不存在 | `-run` 預設是 `impl_1`。若你的專案 run 名稱不同，用 `-run <名稱>` 指定 |
 
 ---
 
 ## 使用方式
 
+> 以下的 `$FLOW` 就是安裝步驟 3 記下的資料夾位置
+> （例如 `~/vivado-report-analyze-flow`）。沒設過的話先跑一次
+> `export FLOW=~/vivado-report-analyze-flow`，或直接把它換成完整路徑。
+
 把原本手動的 `launch_runs` 換成這個單一入口：
 
 ```bash
-vivado -mode batch -source /opt/vivado-report-analyze-flow/tcl/preflight_and_run.tcl -tclargs \
+vivado -mode batch -source $FLOW/tcl/preflight_and_run.tcl -tclargs \
     -project   build/top.xpr \
     -run       impl_1 \
     -rtl-dir   rtl \
@@ -300,7 +401,7 @@ timing_analysis/
 摘要只列出 Top 10 路徑的重點欄位。要看某條路徑的完整 delay table：
 
 ```bash
-python3 /opt/vivado-report-analyze-flow/python/analyze_run.py \
+python3 $FLOW/python/analyze_run.py \
     --outdir timing_analysis --stage impl_1 \
     --show-path "accum_reg[7]"
 ```
@@ -312,7 +413,7 @@ python3 /opt/vivado-report-analyze-flow/python/analyze_run.py \
 不需要重跑 Vivado，也可以對任何 `report_timing_summary` 產物重新分析：
 
 ```bash
-python3 /opt/vivado-report-analyze-flow/python/analyze_run.py \
+python3 $FLOW/python/analyze_run.py \
     --stage impl_1 \
     --timing-summary timing_analysis/raw/timing_summary_impl_1.rpt \
     --outdir timing_analysis
