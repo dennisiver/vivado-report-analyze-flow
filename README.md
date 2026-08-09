@@ -372,6 +372,7 @@ python/
   risk_report.py             中文風險報告的渲染
   trend.py                   history.jsonl 的讀寫與跨執行比較
   analyze_run.py             CLI 入口，串起上述所有模組（階段 8）
+  check_reports.py           自我檢查：對真實報告驗證各 parser 是否正確
 examples/
   sample_*.rpt               七種報告的手刻範例，供測試與格式對照
 tests/
@@ -412,19 +413,64 @@ sh tests/run_tests.sh
 
 ---
 
-## 尚待用真實報告驗證
+## 用真實報告驗證
 
 所有 parser 都是依 Vivado 2021.2 的標準報告格式撰寫的，`examples/` 下是照該格式手刻的範例。
+真實專案的格式可能有出入，所以第一次使用後請跑一次自我檢查。
 
-第一次在真實專案上使用後，請確認：
+### 自我檢查工具
+
+```bash
+python3 python/check_reports.py --dir timing_analysis/raw --stage impl_1
+```
+
+它會對每一份報告跑對應的 parser，然後印出**實際抽取到的數值**，讓你直接對照原始 `.rpt`
+自行確認正確與否 —— **不需要把任何檔案傳出去**。
+
+```
+========================================================================
+utilization
+========================================================================
+  OK        timing_analysis/raw/utilization_impl_1.rpt
+    lut        Slice LUTs             185458/203800 = 91.00%
+    register   Slice Registers        132470/407600 = 32.50%
+...
+========================================================================
+risk assessment
+========================================================================
+  bring-up: BLOCKED   sign-off: BLOCKED
+    [BLOCKER ] CDC.CRITICAL   CDC-1：1-bit unknown CDC circuitry（2 處）
+```
+
+離開狀態：全部解析成功回傳 0，有任何一份失敗回傳 1。
+
+### 解析失敗時
+
+工具會針對失敗的報告印出**結構指紋** —— 只保留欄位標題、表格框線、章節標號、
+severity 關鍵字這類**版面結構**，並把階層式的 instance/net 名稱遮成 `<name>`：
+
+```
+  --- structural fingerprint (instance names masked) ---
+  | Tool Version : Vivado v.2021.2 (lin64) Build 3367213
+  | Design State : Routed
+  +----------+--------+---------------------------+------------------+
+  | Severity | CDC ID | Description               | Endpoint         |
+  +----------+--------+---------------------------+------------------+
+  | Critical | CDC-1  | 1-bit unknown CDC         | <name>           |
+```
+
+把這段貼出來就足以修正 parser（以上例來說，欄位是 `CDC ID` 而不是預期的 `ID`）。
+設計名稱不會被輸出，但**送出前請自己先看過** —— 遮罩是刻意保守的作法，不是保證。
+
+### 逐項確認清單
 
 1. 七份報告都有產生在 `timing_analysis/raw/`。
-2. `latest_<run>.md` 的數字與原始 `.rpt` 一致（特別是 WNS/TNS 與 Top 10 路徑）。
-3. 摘要中沒有出現非預期的「未檢查的項目」—— 若有，代表該報告的實際格式與這裡假設的
-   不同，把那份 `.rpt` 的表格片段提供出來即可據以調整。
-4. 風險判定與你對該設計的實際認知相符。若某條規則太嚴格或太寬鬆，
+2. `check_reports.py` 全部回報 OK。
+3. 抽取到的數值與原始 `.rpt` 一致（特別是 WNS/TNS、資源使用率、各 rule 的 severity）。
+4. `latest_<run>.md` 中沒有非預期的「未檢查的項目」。
+5. 風險判定與你對該設計的實際認知相符。若某條規則太嚴格或太寬鬆，
    調整 `python/risk_rules.py` 的 `DEFAULT_THRESHOLDS` 即可。
 
-**DRC、methodology、CDC、clock interaction 這幾份報告的文字格式最需要實機確認。**
-每個 parser 都是獨立且 fail-soft 的，單一格式不符只會讓該項顯示為「未能解析」，
-不會影響其他分析，也不會中斷 flow。
+**DRC、methodology、CDC、clock interaction 這四份最需要實機確認**，
+因為它們的文字格式版本差異最大。每個 parser 都是獨立且 fail-soft 的，
+單一格式不符只會讓該項顯示為「未能解析」，不會影響其他分析，也不會中斷 flow。

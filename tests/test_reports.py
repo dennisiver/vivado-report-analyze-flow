@@ -225,3 +225,60 @@ class TestFailSoftBehaviour(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCheckReportsTool(unittest.TestCase):
+    """The diagnostic users run on their own reports before sending anything."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _install(self, kinds):
+        for kind in kinds:
+            shutil.copy(sample(kind),
+                        os.path.join(self.dir, "{0}_impl_1.rpt".format(kind)))
+
+    def test_exit_zero_when_everything_parses(self):
+        import check_reports
+        self._install(["timing_summary"] + list(reports.PARSERS))
+        self.assertEqual(check_reports.main(["--dir", self.dir]), 0)
+
+    def test_exit_nonzero_when_a_report_fails(self):
+        import check_reports
+        self._install(["timing_summary"])
+        self.assertEqual(check_reports.main(["--dir", self.dir]), 1)
+
+    def test_fingerprint_keeps_structure_and_masks_instance_names(self):
+        import check_reports
+        path = os.path.join(self.dir, "cdc_impl_1.rpt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join([
+                "| Tool Version : Vivado v.2021.2 (lin64) Build 3367213",
+                "| Design       : secret_product_top",
+                "| Design State : Routed",
+                "",
+                "+----------+--------+------------------------+",
+                "| Severity | CDC ID | Endpoint               |",
+                "+----------+--------+------------------------+",
+                "| Critical | CDC-1  | u_secret/key_reg[7]/D  |",
+                "+----------+--------+------------------------+",
+            ]))
+
+        fingerprint = "\n".join(check_reports._fingerprint(path))
+
+        # Layout must survive: it is what the parser has to be fixed against.
+        self.assertIn("CDC ID", fingerprint)
+        self.assertIn("Severity", fingerprint)
+        self.assertIn("Tool Version", fingerprint)
+        # Design content must not.
+        self.assertNotIn("u_secret", fingerprint)
+        self.assertNotIn("key_reg", fingerprint)
+        self.assertNotIn("secret_product_top", fingerprint)
+
+    def test_missing_directory_is_an_error_not_a_crash(self):
+        import check_reports
+        self.assertEqual(
+            check_reports.main(["--dir", os.path.join(self.dir, "nope")]), 2)
