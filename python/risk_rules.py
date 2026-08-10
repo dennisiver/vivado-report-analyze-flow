@@ -792,6 +792,72 @@ def _evaluate_filelist(result):
             "確認清單路徑與格式。",
             blocks_signoff=True, evidence={"error": error}, source="file list"))
 
+    # Module-level checks. Path agreement does not imply every module has a
+    # definition, and a module with none fails elaboration -- which is exactly
+    # the hour-later surprise this stage exists to pre-empt.
+    file_missing = result.get("file_missing") or {}
+    if file_missing:
+        detail = sorted(file_missing.items())[:6]
+        findings.append(finding(
+            "FILELIST.MODULE_FILE_MISSING",
+            "{0} 個模組的定義檔沒有被加進來".format(len(file_missing)),
+            "這些模組被實例化了，而且它們的定義**就在磁碟上**，"
+            "只是那個檔案沒有出現在 file list 或專案裡。"
+            "elaboration 會直接失敗在「找不到模組」，"
+            "但真正的原因是漏加檔案，而不是模組不存在。",
+            "把下列檔案加進 file list 與專案：{0}".format(
+                "、".join(sorted(set(
+                    path for entry in file_missing.values()
+                    for path in entry["defined_in"]))[:6])),
+            blocks_bringup=True, blocks_signoff=True,
+            evidence={"modules": [name for name, _ in detail],
+                      "defined_in": sorted(set(
+                          path for _, entry in detail
+                          for path in entry["defined_in"]))[:8],
+                      "count": len(file_missing)},
+            source="file list"))
+
+    undefined = result.get("undefined") or {}
+    if undefined:
+        findings.append(finding(
+            "FILELIST.MODULE_UNDEFINED",
+            "{0} 個模組被實例化但找不到定義".format(len(undefined)),
+            "這些模組在掃描範圍內都沒有定義。若確實如此，elaboration 會失敗；"
+            "但也可能是 IP 產生的模組、未收錄的 Xilinx primitive，"
+            "或名稱掃描的誤判 —— 所以不以此阻擋上板，請先確認。",
+            "確認這些名稱是否為 IP 或 primitive；是的話用 config.mk 的 "
+            "IGNORE_MODULES 排除，不是的話補上定義檔。",
+            blocks_signoff=True,
+            evidence={"modules": sorted(undefined)[:10],
+                      "count": len(undefined)},
+            source="file list"))
+
+    if result.get("top_found") is False:
+        findings.append(finding(
+            "FILELIST.TOP_NOT_FOUND",
+            "專案設定的 top module '{0}' 在來源檔中找不到".format(
+                result.get("project_top")),
+            "top module 是整個合成的進入點。名稱打錯或定義檔沒被加進來，"
+            "合成會從第一步就失敗，或（更糟）合出一個空殼。",
+            "確認 top module 名稱拼寫，以及它的定義檔是否在 file list 中。",
+            blocks_bringup=True, blocks_signoff=True,
+            evidence={"top": result.get("project_top")},
+            source="file list"))
+
+    if result.get("reconcile") is None:
+        findings.append(finding(
+            "FILELIST.PROJECT_NOT_CHECKED",
+            "file list 與專案的對帳未執行",
+            "沒有讀到 `.xpr`，也沒有先前產生的 fileset 清單，"
+            "所以「兩邊是否一致」這件事**沒有被檢查**。"
+            "檔案存在不代表專案真的有用到它們。",
+            "在 config.mk 設定 PROJECT，或先跑一次 `make check-project` "
+            "產生 fileset 清單。原因：{0}".format(
+                result.get("project_reason", "未知")),
+            blocks_signoff=True,
+            evidence={"reason": result.get("project_reason")},
+            source="file list"))
+
     reconciliation = result.get("reconcile")
     if reconciliation and not reconciliation["consistent"]:
         only_list = reconciliation["only_in_filelist"]

@@ -8,6 +8,7 @@
 - [嚴重度怎麼推導](#嚴重度怎麼推導)
 - [階段差異](#階段差異)
 - [全部規則](#全部規則)
+- [模組層級檢查](#模組層級檢查)
 - [Log 訊息分類](#log-訊息分類)
 - [閾值](#閾值)
 - [Waiver](#waiver)
@@ -45,7 +46,7 @@ blocks_bringup=False, signoff=True      → CRITICAL
 
 ## 全部規則
 
-### 阻擋上板（BLOCKER，17 條）
+### 阻擋上板（BLOCKER，21 條）
 
 | Rule ID | 意義 |
 |---|---|
@@ -64,6 +65,8 @@ blocks_bringup=False, signoff=True      → CRITICAL
 | `FILELIST.MISSING_FILE` | file list 引用了不存在的檔案 |
 | `FILELIST.MISSING_INCDIR` | `+incdir+` 目錄不存在 |
 | `FILELIST.PROJECT_MISMATCH` | file list 與 `.xpr` 不一致 |
+| `FILELIST.MODULE_FILE_MISSING` | 模組被實例化，定義**就在磁碟上**但檔案沒被加進來 —— elaboration 必定失敗 |
+| `FILELIST.TOP_NOT_FOUND` | 專案設定的 top module 在來源檔中找不到 |
 | `LOG.CONSTRAINT_NOT_APPLIED` | constraint 指向不存在的物件，那一行沒生效 |
 | `LOG.UNBOUND_MODULE` | 模組沒有定義，被當黑盒子 |
 | `LOG.ERROR` | Vivado 自己判定為 ERROR |
@@ -89,6 +92,8 @@ blocks_bringup=False, signoff=True      → CRITICAL
 | `PROV.DIRTY_INPUTS` | 有未 commit 的設計檔，bitstream 無法由 git 重現 |
 | `FILELIST.DUPLICATE_MODULE` | 同名模組定義在多個檔案，取用哪份看讀取順序 |
 | `FILELIST.PARSE_ERROR` | file list 無法完整解析 |
+| `FILELIST.MODULE_UNDEFINED` | 模組被實例化但掃描範圍內找不到定義（可能是 IP／primitive／誤判，故不阻擋上板） |
+| `FILELIST.PROJECT_NOT_CHECKED` | 沒有 `.xpr` 也沒有 fileset 清單，**對帳根本沒執行** |
 | `LOG.INFERRED_LATCH` | 推論出非預期的 latch |
 | `LOG.UNDRIVEN_NET` | 訊號未驅動或多重驅動 |
 | `META.REPORT_UNAVAILABLE` | 某項分析未執行或解析失敗（安全相關的報告） |
@@ -112,6 +117,29 @@ blocks_bringup=False, signoff=True      → CRITICAL
 ### INFO
 
 `DRC.ADVISORY`、`METH.ADVISORY`，以及非安全相關報告的 `META.REPORT_UNAVAILABLE`。
+
+## 模組層級檢查
+
+路徑對帳只比對「哪些檔案」，**不保證每個模組都有定義**。兩份清單可以完全一致，
+卻仍然有模組沒人定義 —— 那會在 elaboration 才爆出來。所以階段 1 另外掃描
+所有 `module`/`entity` 宣告與實例化，比對兩者。
+
+分成兩級，因為信心程度差很多：
+
+| 情況 | 規則 | 嚴重度 |
+|---|---|---|
+| 模組定義**在磁碟上某個檔案**，只是那個檔案沒被加進 build | `FILELIST.MODULE_FILE_MISSING` | **BLOCKER** |
+| 模組在掃描範圍內**哪裡都找不到** | `FILELIST.MODULE_UNDEFINED` | CRITICAL |
+
+第一種信心極高且極可行動 —— 訊息會直接指出「定義在 `rtl/fifo.v`，把它加進來」。
+第二種可能是 IP 產生的模組、未收錄的 Xilinx primitive、或名稱掃描的誤判，
+所以不用它去擋一個本來會成功的 build。
+
+**降低誤判的機制**：內建 Xilinx UNISIM primitive 清單、`.xci` 的 IP 名稱自動視為已定義、
+`config.mk` 的 `IGNORE_MODULES`、以及過濾語言關鍵字（`if`、`always`、`case`…）。
+
+回答使用者時：看到 `MODULE_UNDEFINED` 要先確認那些名稱是不是 IP 或 primitive，
+不要直接斷定 RTL 有錯。
 
 ## Log 訊息分類
 

@@ -42,6 +42,13 @@ WAIVERS   = waivers.json
 # 稽核時要略過的檔案（glob，可多個），例如 testbench
 # EXCLUDE = */tb/* */sim/*
 
+# 模組掃描要忽略的名稱（可多個）。
+# `make check-files` 會比對「被實例化的模組」與「有定義的模組」，
+# 在 elaboration 之前就抓出找不到的模組。
+# Xilinx primitive（BUFG、FDRE…）與 .xci 的 IP 已自動排除；
+# 若還有由外部函式庫提供、掃不到定義的模組，列在這裡。
+# IGNORE_MODULES = my_encrypted_ip vendor_macro
+
 # 若 vivado 或 python3 不在 PATH 上，在這裡指定完整路徑
 # VIVADO = /tools/Xilinx/Vivado/2024.2/bin/vivado
 # PYTHON = /tools/Xilinx/Vivado/2024.2/tps/lnx64/python-3.10.6/bin/python3

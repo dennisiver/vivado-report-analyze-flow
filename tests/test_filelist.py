@@ -210,3 +210,284 @@ class TestFileListRiskGrading(FileListCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestXprParsing(FileListCase):
+    """The .xpr is XML, so the reconciliation needs no Vivado."""
+
+    def test_sample_project(self):
+        result = filelist.parse_xpr(
+            os.path.join(REPO, "examples", "sample_project.xpr"))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["top"], "top")
+
+        names = sorted(os.path.basename(p) for p in result["sources"])
+        self.assertEqual(names, ["fifo_rx.xci", "pipe.sv", "top.v"])
+        self.assertEqual([os.path.basename(p) for p in result["constraints"]],
+                         ["main.xdc"])
+        self.assertEqual([os.path.basename(p) for p in result["ip"]],
+                         ["fifo_rx.xci"])
+
+    def test_simulation_sources_are_not_part_of_the_build(self):
+        # tb_top.sv is in sim_1; treating it as a build source would make the
+        # reconciliation complain about a file the synthesis never sees.
+        result = filelist.parse_xpr(
+            os.path.join(REPO, "examples", "sample_project.xpr"))
+        self.assertFalse(any("tb_top" in p for p in result["sources"]))
+        self.assertIn("sim_1", result["filesets"])
+
+    def test_pprdir_is_resolved_against_the_project_location(self):
+        self.write("build/top.xpr", "\n".join([
+            '<?xml version="1.0"?>',
+            '<Project Version="7">',
+            '  <FileSets>',
+            '    <FileSet Name="sources_1" Type="DesignSrcs">',
+            '      <File Path="$PPRDIR/../rtl/top.v"/>',
+            '    </FileSet>',
+            '  </FileSets>',
+            '</Project>',
+        ]))
+        result = filelist.parse_xpr(os.path.join(self.dir, "build", "top.xpr"))
+        expected = os.path.normpath(os.path.join(self.dir, "rtl", "top.v"))
+        self.assertEqual(result["sources"], [expected])
+
+    def test_unreadable_or_wrong_shape_returns_none(self):
+        self.assertIsNone(filelist.parse_xpr(
+            os.path.join(self.dir, "absent.xpr")))
+        self.assertIsNone(filelist.parse_xpr(
+            self.write("broken.xpr", "not xml at all <<<")))
+        self.assertIsNone(filelist.parse_xpr(
+            self.write("empty.xpr", "<?xml version='1.0'?><Project/>")))
+
+
+class TestModuleScanning(FileListCase):
+    def test_declarations_and_instantiations(self):
+        top = self.write("top.v", "\n".join([
+            "module top (input clk);",
+            "  pipe u_pipe (.clk(clk));",
+            "  fifo #(.W(8)) u_fifo (.clk(clk));",
+            "endmodule",
+        ]))
+        result = filelist.scan_modules([top])
+        self.assertEqual(sorted(result["declared"]), ["top"])
+        self.assertEqual(sorted(result["instantiated"]), ["fifo", "pipe"])
+
+    def test_language_keywords_are_not_modules(self):
+        # `if (` would otherwise be split into two identifiers by backtracking.
+        top = self.write("top.v", "\n".join([
+            "module top (input clk, output reg q);",
+            "  always @(posedge clk) begin",
+            "    if (clk) q <= 1'b0;",
+            "    else q <= 1'b1;",
+            "  end",
+            "  case (clk)",
+            "    default: ;",
+            "  endcase",
+            "endmodule",
+        ]))
+        self.assertEqual(filelist.scan_modules([top])["instantiated"], {})
+
+    def test_commented_out_instantiations_are_ignored(self):
+        top = self.write("top.v", "\n".join([
+            "module top;",
+            "  // ghost u_ghost (.a(1));",
+            "  /* phantom u_phantom (.a(1)); */",
+            "  real_mod u_real (.a(1));",
+            "endmodule",
+        ]))
+        self.assertEqual(sorted(filelist.scan_modules([top])["instantiated"]),
+                         ["real_mod"])
+
+    def test_vhdl_entity_and_component(self):
+        path = self.write("top.vhd", "\n".join([
+            "entity top is",
+            "end entity;",
+            "architecture rtl of top is",
+            "  component fifo port (clk : in std_logic); end component;",
+            "begin",
+            "  u_pipe : entity work.pipe port map (clk => clk);",
+            "  -- u_ghost : entity work.ghost port map (clk => clk);",
+            "end architecture;",
+        ]))
+        result = filelist.scan_modules([path])
+        self.assertIn("top", result["declared"])
+        self.assertIn("fifo", result["instantiated"])
+        self.assertIn("pipe", result["instantiated"])
+        self.assertNotIn("ghost", result["instantiated"])
+
+    def test_self_reference_is_not_a_dependency(self):
+        path = self.write("top.v", "module top (input a); endmodule")
+        self.assertNotIn("top", filelist.scan_modules([path])["instantiated"])
+
+
+class TestMissingModuleClassification(FileListCase):
+    """Two tiers, because the two cases warrant very different confidence."""
+
+    def _project(self):
+        self.write("rtl/top.v", "\n".join([
+            "module top (input clk);",
+            "  pipe u_pipe (.clk(clk));",
+            "  fifo u_fifo (.clk(clk));",
+            "  mystery u_mystery (.clk(clk));",
+            "  BUFG u_bufg (.I(clk));",
+            "endmodule",
+        ]))
+        self.write("rtl/pipe.v", "module pipe(input clk); endmodule")
+        self.write("rtl/fifo.v", "module fifo(input clk); endmodule")
+        return self.write("files.f", "rtl/top.v\nrtl/pipe.v\n")
+
+    def test_module_defined_on_disk_but_not_in_the_build(self):
+        listing = self._project()
+        result = filelist.check([listing],
+                                search_dirs=[os.path.join(self.dir, "rtl")])
+
+        self.assertIn("fifo", result["file_missing"])
+        self.assertTrue(any("fifo.v" in p for p in
+                            result["file_missing"]["fifo"]["defined_in"]))
+        self.assertNotIn("fifo", result["undefined"])
+
+    def test_module_defined_nowhere_is_the_lower_confidence_tier(self):
+        listing = self._project()
+        result = filelist.check([listing],
+                                search_dirs=[os.path.join(self.dir, "rtl")])
+        self.assertIn("mystery", result["undefined"])
+        self.assertNotIn("mystery", result["file_missing"])
+
+    def test_xilinx_primitives_are_never_reported(self):
+        listing = self._project()
+        result = filelist.check([listing],
+                                search_dirs=[os.path.join(self.dir, "rtl")])
+        self.assertNotIn("BUFG", result["undefined"])
+        self.assertNotIn("BUFG", result["file_missing"])
+
+    def test_ignore_module_suppresses_a_name(self):
+        listing = self._project()
+        result = filelist.check([listing],
+                                search_dirs=[os.path.join(self.dir, "rtl")],
+                                ignore_modules=["mystery"])
+        self.assertNotIn("mystery", result["undefined"])
+
+    def test_ip_from_the_xci_counts_as_defined(self):
+        self.write("rtl/top.v", "\n".join([
+            "module top (input clk);",
+            "  fifo_rx u_fifo (.clk(clk));",
+            "endmodule",
+        ]))
+        self.write("ip/fifo_rx/fifo_rx.xci", "{}")
+        self.write("build/top.xpr", "\n".join([
+            '<?xml version="1.0"?>',
+            '<Project Version="7">',
+            '  <FileSets>',
+            '    <FileSet Name="sources_1" Type="DesignSrcs">',
+            '      <File Path="$PPRDIR/../rtl/top.v"/>',
+            '      <File Path="$PPRDIR/../ip/fifo_rx/fifo_rx.xci"/>',
+            '      <Config><Option Name="TopModule" Val="top"/></Config>',
+            '    </FileSet>',
+            '  </FileSets>',
+            '</Project>',
+        ]))
+        listing = self.write("files.f", "rtl/top.v\n")
+        result = filelist.check(
+            [listing], project=os.path.join(self.dir, "build", "top.xpr"))
+        self.assertNotIn("fifo_rx", result["undefined"])
+        self.assertIn("fifo_rx", result["ignored_modules"])
+
+    def test_a_complete_build_reports_nothing(self):
+        self.write("rtl/top.v", "module top; pipe u (.a(1)); endmodule")
+        self.write("rtl/pipe.v", "module pipe(input a); endmodule")
+        listing = self.write("files.f", "rtl/top.v\nrtl/pipe.v\n")
+        result = filelist.check([listing])
+        self.assertEqual(result["file_missing"], {})
+        self.assertEqual(result["undefined"], {})
+
+
+class TestTopModule(FileListCase):
+    def test_top_found(self):
+        self.write("rtl/top.v", "module top; endmodule")
+        self.write("build/top.xpr", "\n".join([
+            '<?xml version="1.0"?>',
+            '<Project Version="7"><FileSets>',
+            '  <FileSet Name="sources_1" Type="DesignSrcs">',
+            '    <File Path="$PPRDIR/../rtl/top.v"/>',
+            '    <Config><Option Name="TopModule" Val="top"/></Config>',
+            '  </FileSet>',
+            '</FileSets></Project>',
+        ]))
+        listing = self.write("files.f", "rtl/top.v\n")
+        result = filelist.check(
+            [listing], project=os.path.join(self.dir, "build", "top.xpr"))
+        self.assertTrue(result["top_found"])
+
+    def test_top_missing_is_detected(self):
+        self.write("rtl/top.v", "module something_else; endmodule")
+        self.write("build/top.xpr", "\n".join([
+            '<?xml version="1.0"?>',
+            '<Project Version="7"><FileSets>',
+            '  <FileSet Name="sources_1" Type="DesignSrcs">',
+            '    <File Path="$PPRDIR/../rtl/top.v"/>',
+            '    <Config><Option Name="TopModule" Val="top"/></Config>',
+            '  </FileSet>',
+            '</FileSets></Project>',
+        ]))
+        listing = self.write("files.f", "rtl/top.v\n")
+        result = filelist.check(
+            [listing], project=os.path.join(self.dir, "build", "top.xpr"))
+        self.assertFalse(result["top_found"])
+
+        assessment = risk_rules.evaluate(filelist=result)
+        found = [f for f in assessment["findings"]
+                 if f["id"] == "FILELIST.TOP_NOT_FOUND"][0]
+        self.assertEqual(found["severity"], risk_rules.BLOCKER)
+
+
+class TestReconciliationActuallyRuns(FileListCase):
+    """Regression: reconcile() existed but nothing ever called it."""
+
+    def test_xpr_drives_the_reconciliation(self):
+        self.write("rtl/top.v", "module top; endmodule")
+        self.write("rtl/extra.v", "module extra; endmodule")
+        self.write("build/top.xpr", "\n".join([
+            '<?xml version="1.0"?>',
+            '<Project Version="7"><FileSets>',
+            '  <FileSet Name="sources_1" Type="DesignSrcs">',
+            '    <File Path="$PPRDIR/../rtl/top.v"/>',
+            '    <File Path="$PPRDIR/../rtl/extra.v"/>',
+            '  </FileSet>',
+            '</FileSets></Project>',
+        ]))
+        listing = self.write("files.f", "rtl/top.v\n")
+
+        result = filelist.check(
+            [listing], project=os.path.join(self.dir, "build", "top.xpr"))
+        self.assertEqual(result["project_source"], "xpr")
+        self.assertFalse(result["reconcile"]["consistent"])
+        self.assertEqual(
+            [os.path.basename(p)
+             for p in result["reconcile"]["only_in_project"]], ["extra.v"])
+
+        assessment = risk_rules.evaluate(filelist=result)
+        found = [f for f in assessment["findings"]
+                 if f["id"] == "FILELIST.PROJECT_MISMATCH"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["severity"], risk_rules.BLOCKER)
+
+    def test_falls_back_to_the_fileset_dump(self):
+        top = self.write("rtl/top.v", "module top; endmodule")
+        listing = self.write("files.f", "rtl/top.v\n")
+        result = filelist.check([listing], fileset_files=[top],
+                               project=os.path.join(self.dir, "absent.xpr"))
+        self.assertEqual(result["project_source"], "fileset-list")
+        self.assertTrue(result["reconcile"]["consistent"])
+
+    def test_no_project_is_reported_as_not_checked(self):
+        # Never silently pass: "the files exist" is not "the project uses them".
+        self.write("rtl/top.v", "module top; endmodule")
+        listing = self.write("files.f", "rtl/top.v\n")
+        result = filelist.check([listing])
+
+        self.assertIsNone(result.get("reconcile"))
+        assessment = risk_rules.evaluate(filelist=result)
+        found = [f for f in assessment["findings"]
+                 if f["id"] == "FILELIST.PROJECT_NOT_CHECKED"][0]
+        self.assertEqual(found["severity"], risk_rules.CRITICAL)
+        self.assertFalse(assessment["verdict"]["signoff_ok"])

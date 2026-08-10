@@ -288,3 +288,31 @@ class TestReadingRulesAreStated(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStatedCountsAreAccurate(unittest.TestCase):
+    """A number in the docs is a claim, and claims drift silently."""
+
+    def test_blocker_count_in_the_heading_matches_the_code(self):
+        rules = collect_rules()
+        actual = sum(1 for blocks in rules.values() if blocks)
+        text = _read(os.path.join(REFERENCES, "risk-model.md"))
+
+        match = re.search(r"BLOCKER[，,]\s*(\d+)\s*條", text)
+        self.assertIsNotNone(match, "risk-model.md no longer states a count")
+        self.assertEqual(int(match.group(1)), actual,
+                         "risk-model.md says {0} blocking rules, code has "
+                         "{1}".format(match.group(1), actual))
+
+    def test_every_blocking_rule_is_in_the_blocker_table(self):
+        # Being mentioned anywhere satisfies the reconciliation test; a reader
+        # looking up "what blocks bring-up" needs them in that one table.
+        rules = collect_rules()
+        text = _read(os.path.join(REFERENCES, "risk-model.md"))
+        section = text.split("### 阻擋上板")[1].split("### 阻擋 sign-off")[0]
+
+        missing = sorted(name for name, blocks in rules.items()
+                         if blocks and "`{0}`".format(name) not in section)
+        self.assertEqual(missing, [],
+                         "blocking rules absent from the BLOCKER table: "
+                         "{0}".format(missing))

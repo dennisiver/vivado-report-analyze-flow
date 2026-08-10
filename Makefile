@@ -27,6 +27,7 @@ RUN       ?= impl_1
 JOBS      ?= 4
 WAIVERS   ?= waivers.json
 EXCLUDE   ?=
+IGNORE_MODULES ?=
 VIVADO    ?= vivado
 PYTHON    ?= python3
 
@@ -100,10 +101,19 @@ check-env:
 
 # --- 階段 1（不需要 Vivado）--------------------------------------------------
 
+# PROJECT 是選填的：沒設也能檢查檔案是否存在，只是「與專案是否一致」會被
+# 標示為未檢查，而不是靜靜跳過。.xpr 直接當 XML 讀，所以仍然不需要 Vivado。
+FILELIST_ARGS := --outdir $(OUTDIR) \
+                 $(foreach f,$(FILELIST),--filelist $(f)) \
+                 $(if $(wildcard $(PROJECT)),--project $(PROJECT),) \
+                 $(if $(wildcard $(OUTDIR)/manifests/filelist_$(RUN)_sources.txt),\
+                    --fileset-list $(OUTDIR)/manifests/filelist_$(RUN)_sources.txt,) \
+                 $(foreach d,$(RTL_DIRS),--search-dir $(d)) \
+                 $(foreach m,$(IGNORE_MODULES),--ignore-module $(m))
+
 check-files: require-filelist
 	@echo "== 階段 1：靜態檔案檢查（不需要 Vivado）=="
-	$(PYTHON) $(PY)/filelist.py --outdir $(OUTDIR) \
-	  $(foreach f,$(FILELIST),--filelist $(f))
+	$(PYTHON) $(PY)/filelist.py $(FILELIST_ARGS)
 
 # --- 階段 2 ------------------------------------------------------------------
 

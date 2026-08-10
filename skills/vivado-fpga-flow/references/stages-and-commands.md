@@ -54,8 +54,21 @@ OS 不在 Vivado 2024.2 支援清單 → `ENV.OS_UNSUPPORTED`（WARNING，不阻
   會正確跳過 `-fileset sources_1` 這種選項與其值。
 - `.txt` —— 一行一個路徑。
 
-檢查項目：檔案是否存在、`+incdir+` 目錄是否存在、**與 `.xpr` fileset 雙向對帳**
-（清單獨有 / 專案獨有都會報）、同名模組重複定義。
+檢查項目：
+
+1. 檔案是否存在、`+incdir+` 目錄是否存在
+2. **與專案雙向對帳**（清單獨有 / 專案獨有都會報）。
+   `.xpr` 直接當 XML 讀（`$PPRDIR`／`$PSRCDIR` 變數會展開），所以仍然不需要 Vivado；
+   讀不到才退而使用階段 2 產生的 `manifests/filelist_<run>_sources.txt`；
+   兩者都沒有就報 `FILELIST.PROJECT_NOT_CHECKED`，**不會靜靜跳過**
+3. **模組層級比對** —— 掃出所有 `module`/`entity` 宣告與實例化，
+   找出被用到但沒有定義的模組。這是路徑對帳擋不住的那一類問題
+   （兩份清單可以完全一致，卻仍有模組沒人定義），詳見 `risk-model.md`
+4. top module 是否在來源檔中找得到
+5. 同名模組重複定義
+
+`sim_1` 這類 simulation fileset 不列入 build 來源，
+否則 testbench 會被誤報為「專案獨有」。
 
 ### 2. `make check-project` —— .xpr 專案稽核
 

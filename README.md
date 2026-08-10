@@ -89,7 +89,7 @@ flowchart TD
 | # | 階段 | 檢查什麼 | 負責的檔案 | 需要 Vivado |
 |---|---|---|---|---|
 | 0 | `check-env` | Vivado 版本與 build、OS、主機、Python；**與上次的基準線比對** | `tcl/check_environment.tcl`、`python/environment.py` | 是（取版本） |
-| 1 | `check-files` | file list（`.f`/`.tcl`/`.txt`）每個檔案是否存在、`+incdir+` 目錄、**清單與 .xpr 雙向對帳**、重複模組定義 | `python/filelist.py` | **否** |
+| 1 | `check-files` | file list 每個檔案是否存在、`+incdir+` 目錄、**清單與 .xpr 雙向對帳**（直接讀 XML，不需 Vivado）、**被實例化但沒有定義的模組**、top module 是否存在、重複模組定義 | `python/filelist.py` | **否** |
 | 2 | `check-project` | fileset vs 磁碟差集、專案引用但已不存在的檔案、被 disable 的 constraint、`USED_IN_*`、synth/impl constraint fileset 是否一致；同時算 RTL/XDC 的 sha256 manifest | `tcl/preflight_and_run.tcl`、`python/manifest.py` | 是 |
 | 3 | `elaborate` | `synth_design -rtl` 只做 elaboration：模組找不到、port 寬度不匹配、`include` 遺失、語法錯誤 | `tcl/elaborate_check.tcl` | 是 |
 | 4 | `synth` | 合成後的時序（**當作估算值評分**）、資源、CDC、log 訊息 | `tcl/preflight_and_run.tcl` | 是 |
@@ -104,6 +104,11 @@ flowchart TD
 階段 1 抓的是「改了 `.xdc` 但沒 `add_files`」「file list 裡的檔案不存在」這類問題。
 Vivado 自己的 out-of-date 偵測**永遠不會觸發** —— 那些檔案從頭到尾就不屬於這個專案，
 無從偵測起。只有主動比對才抓得到，而且**完全不需要啟動 Vivado**。
+
+而且**光比對路徑還不夠**：兩份清單可以完全一致、每個檔案都存在，
+卻仍然有某個模組沒人定義（新加的 submodule 被實例化了，但它的檔案從沒被加進任何一邊）。
+所以階段 1 還會比對**模組定義與實例化**，在 elaboration 之前就指出
+「`fifo` 定義在 `rtl/fifo.v`，但那個檔案沒被加進來」。
 
 **b) 沒檢查到的，絕不呈現為沒問題**
 
@@ -223,6 +228,8 @@ latest_flow.md   latest_<stage>.md    risk_<stage>.md  signoff_latest.md
 | timing | 組合迴路 | 靜態時序分析無法描述，行為不可預測 |
 | timing | Setup 缺口 > 週期 10% | 要降的幅度大到已不具代表性 |
 | timing | 未約束 endpoint > 總數 1% | WNS 無法代表這個設計 |
+| file list | 模組定義檔沒被加進來 | 定義就在磁碟上，elaboration 必定失敗在「找不到模組」 |
+| file list | top module 找不到 | 合成的進入點不存在 |
 | CDC | Critical（CDC-1 等） | metastability，「實驗室正常、上板偶發」的典型根因 |
 | clock interaction | 無共同來源卻被同步分析 | 相位關係不確定，算出的 slack 不成立 |
 | DRC | `NSTD-1` / `UCIO-1` | 預設會擋下 write_bitstream；I/O 無電氣標準，有傷板風險 |
