@@ -96,6 +96,7 @@ flowchart TD
 | 5 | `impl` | 繞線後的完整分析：timing、utilization、DRC、methodology、CDC、clock interaction、control sets、IP status、QoR | 同上 | 是 |
 | 6 | `bitstream` | 延伸到 `write_bitstream` 並確認 `.bit` 確實產生 | 同上 | 是 |
 | 7 | `signoff` | 彙整全部階段，產出**人類審閱簽核**用的完整報告 | `python/signoff_report.py` | **否** |
+| — | `gen-ip` | 把階段 1 找到的缺 IP 尺寸交給**你自己的**產生腳本，跑完查核 IP 是否真的存在 | `tcl/generate_missing_ip.tcl` | 是（需明確要求） |
 
 ### 三個貫穿全流程的原則
 
@@ -413,12 +414,14 @@ make synth           # 階段 4：合成 + 分析
 make impl            # 階段 5：實作 + 分析
 make bitstream       # 階段 6：產生 bitstream
 make signoff         # 階段 7：人類簽核報告        [不需 Vivado]
+
+make gen-ip          # 補產階段 1 找到的缺 IP      [需要 Vivado，分鐘級]
 ```
 
 組合用的 target：
 
 ```bash
-make check     # 階段 0-3，所有建置前的檢查
+make check     # 階段 0-3（0-2 全部跑完一次報齊，階段 3 才 gate）
 make all       # 階段 0-7 完整流程
 make help      # 列出全部 target 與目前設定
 make test      # 這個工具自己的測試（不需要 Vivado）
@@ -427,6 +430,56 @@ make clean     # 清除分析輸出
 
 各 target 之間**刻意不設 Make 相依**：合成流程的階段耗時差異太大
 （秒級 vs 數十分鐘），自動連鎖觸發只會帶來意外。要照順序跑就用 `make all`。
+
+### 每個 target 結束都有大字結果
+
+`PASS` / `WARN` / `FAIL`，同一行另有純文字的 `[PASS]` 供 grep 與 CI 使用。
+
+分級**不只看 exit code**。這個 flow 刻意在有 BLOCKER 時仍以 0 結束
+（要 `-fail-on-blocker` 才擋，這樣加入風險分級不會改變既有腳本的行為），
+所以照 exit code 印綠色 PASS 會在最該示警的時候說謊：
+
+| 圖示 | 條件 |
+|---|---|
+| `PASS` | exit 0，且該階段的風險判定乾淨 |
+| `WARN` | exit 0 但有 WARNING/CRITICAL；或**判定檔讀不到** |
+| `FAIL` | exit 非 0，**或 exit 0 但判定有 BLOCKER** |
+
+判定檔讀不到是 `WARN` 不是 `PASS`。`BANNER_ASCII=1` 強制 ASCII 字形，
+`NO_COLOR=1` 關閉顏色。
+
+### `make check` 的 fail-fast 是有粒度的
+
+不是「第一個失敗就停」。階段 0、1、2 都是秒級，**全部跑完一次把問題報齊**——
+第一個失敗就停，只會讓人為了 N 個問題來回 N 次。階段 3（elaboration）是分鐘級，
+才依彙總後的**風險判定**（不是 exit code）決定跑不跑。
+
+某階段失敗導致下一階段真的不可能執行時（Vivado 不可用 → 開不了專案），
+標成「未執行」而不是靜靜跳過。結論與原因寫在
+`timing_analysis/precheck_latest.md`。
+
+### 缺少的 IP：偵測在這裡，產生在你的腳本
+
+階段 1 掃到被實例化卻不存在、名稱形如 `blk_mem_gen_<深度>x<寬度>` 的模組時，
+把尺寸寫進 `manifests/missing_ip_specs.txt`。`make gen-ip` 把那份清單交給
+**你自己的**產生腳本（`config.mk` 的 `SRAM_GEN_TCL`），跑完再逐一 `get_ips`
+查核——「腳本乾淨結束」不等於「IP 產出來了」。
+
+本工具刻意不含任何 `create_ip`：你的腳本才知道正確的 core 版本與 CONFIG 字典。
+
+你的腳本開頭的 spec 清單請包成守衛，單獨執行時行為完全不變：
+
+```tcl
+if {![info exists sram_specs]} {
+    set sram_specs {
+        2048x8
+    }
+}
+```
+
+`gen-ip` 預設不掛進 `check` / `all`：只憑模組名稱產生的 IP 組態是寫死的，
+可能生出名稱正確但**組態錯誤**的 core——elaboration 會過、上板卻是錯的，
+比原本的失敗更難查。要自動化就設 `GEN_IP_AUTO = 1`。
 
 ### 建議的日常用法
 

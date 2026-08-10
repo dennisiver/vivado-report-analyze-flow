@@ -45,6 +45,7 @@ ls config.mk timing_analysis/ 2>/dev/null
 | 檔案 | 什麼時候讀 |
 |---|---|
 | `timing_analysis/latest_flow.md` | **一律先讀這份。** 跨階段總覽，約 30 行，含兩個判定、各階段的 BLOCKER/CRITICAL 數量、合併後的 BLOCKER 清單、**未執行的階段** |
+| `timing_analysis/precheck_latest.md` | 只跑了 `make check`（還沒建置）時讀這份。階段 0-2 的彙總，以及**為什麼沒有進 elaboration** |
 | `timing_analysis/latest_<stage>.md` | 需要某個階段的細節時（`latest_impl_1.md`、`latest_synth_1.md`） |
 | `timing_analysis/risk_<stage>.md` | 需要 CRITICAL / WARNING 等級的完整說明時 |
 
@@ -75,15 +76,30 @@ python3 <flow>/python/analyze_run.py --outdir timing_analysis \
 | 1 | `make check-files` | file list 的檔案是否存在、與 `.xpr` 雙向對帳 | **否**（秒級） |
 | 2 | `make check-project` | fileset 稽核、constraint 是否被套用 | 是（秒級） |
 | 3 | `make elaborate` | 模組找不到、port 不匹配、語法錯誤 | 是（分鐘級） |
+| — | `make gen-ip` | 用使用者自己的腳本補產階段 1 找到的缺 IP | 是（分鐘級，需明確要求） |
 | 4 | `make synth` | 合成 + 分析 | 是 |
 | 5 | `make impl` | 實作 + 完整分析 | 是 |
 | 6 | `make bitstream` | 產生 `.bit` 並確認存在 | 是 |
 | 7 | `make signoff` | 人類簽核報告 | **否** |
 
-組合：`make check`（0–3，建置前全部）、`make all`（0–7）、`make help`。
+組合：`make check`（0–3）、`make all`（0–7）、`make help`。
+
+`make check` 不是單純把四個階段串起來：階段 0–2 都是秒級，會**全部跑完一次報齊**
+（第一個失敗就停，只會讓人為了 N 個問題來回 N 次）；階段 3 是分鐘級，
+才依彙總後的風險判定決定跑不跑。結論寫在 `precheck_latest.md`。
 
 使用者改了 RTL 或 XDC 之後想快速確認，建議 `make check-files` ——
 不需要 Vivado，幾秒鐘就知道有沒有漏檔。
+
+**每個 target 結束都會印一個大字結果**：`PASS` / `WARN` / `FAIL`，同一行也有
+純文字的 `[PASS]` 可以 grep。注意 `FAIL` 不只看 exit code —— 這個 flow 刻意在
+有 BLOCKER 時仍以 0 結束（要 `-fail-on-blocker` 才擋），所以 banner 會讀該階段的
+風險判定。看到 `[FAIL]` 但指令「成功」了，那是正常的，代表判定說不可上板。
+
+`make gen-ip`：階段 1 發現被實例化卻不存在、名稱長得像 `blk_mem_gen_<深度>x<寬度>`
+的模組時，把尺寸交給使用者自己的 IP 產生腳本（`config.mk` 的 `SRAM_GEN_TCL`）補產。
+**這個 target 不會自動執行**，因為只憑模組名稱產生的 IP 組態是寫死的，
+有機會生出「名稱對、組態錯」的 core。要建議使用者跑，不要自己假設可以跑。
 
 ## 核心心智模型：兩個判定
 
@@ -154,7 +170,7 @@ python3 <flow>/python/analyze_run.py --outdir timing_analysis \
 
 本檔到此已涵蓋日常使用。以下三份放在 `references/`，**有需要才讀**：
 
-- `references/risk-model.md` —— 完整規則表（全部 47 條 rule ID）、各規則的兩個旗標、
+- `references/risk-model.md` —— 完整規則表（全部 57 條 rule ID）、各規則的兩個旗標、
   階段差異、log 訊息分類、閾值、waiver 格式。
   **要判斷某個具體 rule ID 的意義時讀這份。**
 - `references/stages-and-commands.md` —— 八階段的完整細節、所有指令選項、

@@ -49,6 +49,24 @@ WAIVERS   = waivers.json
 # 若還有由外部函式庫提供、掃不到定義的模組，列在這裡。
 # IGNORE_MODULES = my_encrypted_ip vendor_macro
 
+# --- 補產缺少的 IP -----------------------------------------------------------
+
+# 你自己的 IP 產生腳本。`make check-files` 掃到被實例化卻不存在、且名稱長得像
+# blk_mem_gen_<深度>x<寬度> 的模組時，會把尺寸寫進
+# timing_analysis/manifests/missing_ip_specs.txt，`make gen-ip` 再把那份清單
+# 餵給這支腳本。本工具不自己產生 IP —— 你的腳本才知道正確的 core 版本與組態。
+#
+# 腳本開頭的 spec 清單請包成守衛，單獨執行時行為完全不變：
+#     if {![info exists sram_specs]} {
+#         set sram_specs { 2048x8 }
+#     }
+# SRAM_GEN_TCL = tcl/gen_sram_checkdouble2.tcl
+
+# 設成 1 時，`make check` 在階段 1 發現缺 IP 會自動先跑 gen-ip 再重檢一次。
+# 預設 0：只憑模組名稱產生的 IP 組態是寫死的（單埠、無 byte write enable），
+# 有機會生出「名稱對、組態錯」的 core —— elaboration 會過，上板卻是錯的。
+# GEN_IP_AUTO = 1
+
 # 若 vivado 或 python3 不在 PATH 上，在這裡指定完整路徑
 # VIVADO = /tools/Xilinx/Vivado/2024.2/bin/vivado
 # PYTHON = /tools/Xilinx/Vivado/2024.2/tps/lnx64/python-3.10.6/bin/python3

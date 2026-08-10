@@ -51,6 +51,63 @@ status=$(run_make "$MK" check-files)
 grep -q "MISSING" "$MK/make.log" || fail "make check-files: did not report the gap"
 echo "  ok  make check-files -> ran without Vivado, caught the missing file"
 
+# The banner reports; it must never decide. If it swallowed the exit status,
+# `make check` would stop failing fast and `make all` would keep going through
+# a broken stage -- with everything still looking green.
+grep -q "FAIL" "$MK/make.log" \
+    || fail "banner: a failing target must print FAIL"
+echo "  ok  banner -> FAIL shown, exit status still propagated"
+
+# ...and the same wrapper must not turn a success into a failure. This one is
+# genuinely clean: a project to reconcile against, so nothing reads as
+# unchecked.
+mkdir -p "$MK/ok/rtl" "$MK/ok/build"
+echo 'module top; endmodule' > "$MK/ok/rtl/top.v"
+printf 'rtl/top.v\n' > "$MK/ok/files.f"
+cat > "$MK/ok/build/top.xpr" <<'XPR'
+<?xml version="1.0" encoding="UTF-8"?>
+<Project Version="7" Path="$PPRDIR/top.xpr">
+  <FileSets Version="1">
+    <FileSet Name="sources_1" Type="DesignSrcs">
+      <File Path="$PPRDIR/../rtl/top.v"/>
+      <Config>
+        <Option Name="TopModule" Val="top"/>
+      </Config>
+    </FileSet>
+  </FileSets>
+</Project>
+XPR
+cat > "$MK/ok/config.mk" <<CONF
+FILELIST = files.f
+PROJECT  = build/top.xpr
+OUTDIR   = timing_analysis
+PYTHON   = $PYTHON
+CONF
+status=$(run_make "$MK/ok" check-files)
+[ "$status" = "0" ] || fail "banner: a clean run must still exit 0, got $status"
+grep -q "PASS" "$MK/ok/make.log" || fail "banner: a clean run must print PASS"
+echo "  ok  banner -> PASS shown, clean run still exits 0"
+
+# A stage whose problems never reach its exit code (stage 0 and 1 both grade
+# CRITICAL without failing) must not be painted green by the banner.
+"$PYTHON" - "$MK/ok/timing_analysis" <<'PY'
+import json, sys
+path = sys.argv[1] + "/risk_files.json"
+data = json.load(open(path, encoding="utf-8"))
+data["verdict"].update({"bringup_ok": False, "blockers": 1,
+                        "bringup_blocker_count": 1})
+data["verdict"]["counts"]["BLOCKER"] = 1
+json.dump(data, open(path, "w", encoding="utf-8"))
+PY
+"$PYTHON" python/banner.py --status 0 --ascii --no-color \
+    --label "階段 1" --verdict "$MK/ok/timing_analysis/risk_files.json" \
+    > "$WORK/banner.log" || true
+grep -q "指令以狀態" "$WORK/banner.log" \
+    && fail "banner: graded on exit status instead of the verdict"
+grep -q "不可上板" "$WORK/banner.log" \
+    || fail "banner: exit 0 with a BLOCKER must still read as unsafe"
+echo "  ok  banner -> exit 0 with a BLOCKER still reads FAIL"
+
 # signoff must work from whatever artifacts exist, again with no Vivado.
 run_make "$MK" signoff STAGES=impl_1 >/dev/null
 [ -f "$MK/timing_analysis/signoff_latest.md" ] \
@@ -58,6 +115,30 @@ run_make "$MK" signoff STAGES=impl_1 >/dev/null
 grep -q "NOT CHECKED" "$MK/timing_analysis/signoff_latest.md" \
     || fail "make signoff: stages that never ran must read as NOT CHECKED"
 echo "  ok  make signoff -> report written, unrun stages marked NOT CHECKED"
+
+# `make check` must drive stages 0-2 itself and gate stage 3. VIVADO=false
+# makes the Vivado-dependent stages fail deterministically here and on a real
+# workstation alike, so this test never launches a tool.
+cat > "$MK/ok/config.mk" <<CONF
+FILELIST = files.f
+PROJECT  = build/top.xpr
+OUTDIR   = timing_analysis
+PYTHON   = $PYTHON
+VIVADO   = false
+CONF
+status=$(run_make "$MK/ok" check)
+[ "$status" != "0" ] || fail "make check: should not pass when stage 0 fails"
+# The sub-makes must keep the -f pointing at this Makefile; without it every
+# stage dies with "No rule to make target" and the gate never sees any result.
+grep -q "No rule to make target" "$MK/ok/make.log" \
+    && fail "make check: sub-make lost -f and could not find its own targets"
+[ -f "$MK/ok/timing_analysis/precheck_latest.md" ] \
+    || fail "make check: no consolidated pre-check report"
+grep -q "階段 1：靜態檔案檢查" "$MK/ok/make.log" \
+    || fail "make check: stage 1 did not run after stage 0 failed"
+grep -q "elaboration）不執行" "$MK/ok/make.log" \
+    || fail "make check: did not gate elaboration"
+echo "  ok  make check -> cheap stages all ran, elaboration gated"
 
 # A target needing config must explain itself rather than fail obscurely.
 status=$(run_make "$WORK" check-project)
@@ -189,6 +270,49 @@ grep -q "stop-on-synth-blocker" "$WORK/synth_gated.log" \
 grep -q "launch_runs impl_1" "$WORK/synth_gated.log" \
     && fail "synth_gated: ran implementation despite a synth blocker"
 echo "  ok  synth_gated -> stopped before implementation"
+
+echo
+echo "== IP generation wrapper ($TCLSH) =="
+
+run_gen_ip() {
+    scenario=$1
+    set +e
+    "$TCLSH" tests/test_gen_ip.tcl "$scenario" "$WORK/genip_$scenario" \
+        > "$WORK/genip_$scenario.log" 2>&1
+    status=$?
+    set -e
+    echo "$status"
+}
+
+status=$(run_gen_ip ok)
+[ "$status" = "0" ] || fail "gen_ip ok: expected exit 0, got $status"
+grep -q "create_ip blk_mem_gen_1216x80" "$WORK/genip_ok.log" \
+    || fail "gen_ip ok: the detected spec never reached the generator"
+# The stand-in script defaults to 2048x8 when nothing is injected. Seeing that
+# name would mean the guard did not take and we generated the wrong memory.
+grep -q "blk_mem_gen_2048x8" "$WORK/genip_ok.log" \
+    && fail "gen_ip ok: used the script's default list, not the detected specs"
+echo "  ok  gen_ip ok -> detected spec fed to the project's own script"
+
+# "The script exited cleanly" is not "the IP exists". Verifying afterwards is
+# the whole reason this wrapper exists rather than a bare `source`.
+status=$(run_gen_ip nogen)
+[ "$status" = "1" ] || fail "gen_ip nogen: expected exit 1, got $status"
+grep -q "仍然不存在" "$WORK/genip_nogen.log" \
+    || fail "gen_ip nogen: silently accepted a generator that produced nothing"
+echo "  ok  gen_ip nogen -> clean exit from the script is not accepted as done"
+
+status=$(run_gen_ip broken)
+[ "$status" = "1" ] || fail "gen_ip broken: expected exit 1, got $status"
+grep -q "產生腳本執行失敗" "$WORK/genip_broken.log" \
+    || fail "gen_ip broken: did not name the failing script"
+echo "  ok  gen_ip broken -> generator failure reported against its own script"
+
+status=$(run_gen_ip empty)
+[ "$status" = "0" ] || fail "gen_ip empty: expected exit 0, got $status"
+grep -q "open_project" "$WORK/genip_empty.log" \
+    && fail "gen_ip empty: opened the project with nothing to do"
+echo "  ok  gen_ip empty -> nothing to generate, project left alone"
 
 echo
 echo "ALL TESTS PASSED"

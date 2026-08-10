@@ -304,6 +304,22 @@ class TestStatedCountsAreAccurate(unittest.TestCase):
                          "risk-model.md says {0} blocking rules, code has "
                          "{1}".format(match.group(1), actual))
 
+    def test_total_rule_count_in_skill_md_matches_the_code(self):
+        """This one had already drifted (said 47, code had 57).
+
+        The reconciliation tests check that every rule ID is *mentioned*
+        somewhere, which a stale total sails straight through -- so the total
+        needs its own check.
+        """
+        actual = len(collect_rules())
+        text = _read(SKILL_MD)
+
+        match = re.search(r"全部\s*(\d+)\s*條\s*rule ID", text)
+        self.assertIsNotNone(match, "SKILL.md no longer states a rule total")
+        self.assertEqual(int(match.group(1)), actual,
+                         "SKILL.md says {0} rules, code has {1}".format(
+                             match.group(1), actual))
+
     def test_every_blocking_rule_is_in_the_blocker_table(self):
         # Being mentioned anywhere satisfies the reconciliation test; a reader
         # looking up "what blocks bring-up" needs them in that one table.

@@ -432,6 +432,30 @@ def find_missing_modules(in_scope, on_disk, ignore=None):
     return {"file_missing": file_missing, "undefined": undefined}
 
 
+# Xilinx block-memory IP instances are named <core>_<depth>x<width> by the
+# project's own generator script, which is what makes the missing ones
+# recoverable: the name carries the geometry needed to regenerate them.
+_IP_SPEC = re.compile(r"^blk_mem_gen_(\d+)x(\d+)$")
+
+
+def sram_specs(result):
+    """``<depth>x<width>`` for every missing module named like a blk_mem_gen IP.
+
+    Feeds the project's existing IP generator script. Names that do not match
+    the pattern are left out on purpose -- that script cannot produce them, and
+    a spec it cannot honour would be a silent no-op rather than a fix.
+    """
+    names = set(result.get("undefined") or {})
+    names.update(result.get("ip_missing") or {})
+
+    specs = set()
+    for name in names:
+        match = _IP_SPEC.match(name)
+        if match:
+            specs.add("{0}x{1}".format(match.group(1), match.group(2)))
+    return sorted(specs)
+
+
 def check(filelist_paths, fileset_files=None, scan_duplicates=True,
           project=None, search_dirs=None, ignore_modules=None,
           project_source=None):
@@ -582,6 +606,13 @@ def format_report(result):
             name, ", ".join(os.path.basename(p)
                             for p in detail["instantiated_in"][:2])))
 
+    specs = sram_specs(result)
+    if specs:
+        lines.append("  ip      : {0} 個缺少的 IP 可由產生腳本補上：{1}".format(
+            len(specs), "、".join(specs)))
+        lines.append("            執行 'make gen-ip'（需先在 config.mk 設定 "
+                     "SRAM_GEN_TCL）")
+
     if result.get("top_found") is False:
         lines.append("  top     : '{0}' NOT FOUND in any source file".format(
             result.get("project_top")))
@@ -645,6 +676,25 @@ def main(argv=None):
               "w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2, sort_keys=True, ensure_ascii=False)
         handle.write("\n")
+
+    # Always rewritten, including when empty: a stale spec file left over from
+    # a previous run would have `make gen-ip` generate IP nobody is missing.
+    with open(os.path.join(directory, "missing_ip_specs.txt"),
+              "w", encoding="utf-8") as handle:
+        for spec in sram_specs(result):
+            handle.write("{0}\n".format(spec))
+
+    # Grade this stage now, so the end-of-stage banner and the pre-check
+    # summary read one assessment rather than each deriving its own.
+    try:
+        import risk_rules
+        with open(os.path.join(args.outdir, "risk_files.json"),
+                  "w", encoding="utf-8") as handle:
+            json.dump(risk_rules.evaluate(filelist=result), handle,
+                      indent=2, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+    except ImportError:
+        pass
 
     broken = bool(result["missing_files"] or result["parse_errors"]
                   or result.get("file_missing")

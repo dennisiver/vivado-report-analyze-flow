@@ -25,6 +25,8 @@ namespace eval ::stub {
 
     variable report_bodies       ;# report kind -> canned sample file
     array set report_bodies {}
+
+    variable ips {}              ;# IP instance names present in the project
 }
 
 proc ::stub::record {line} {
@@ -55,7 +57,43 @@ proc ::stub::add_files {fileset paths} {
 # --- Vivado command surface --------------------------------------------------
 
 proc open_project {path} { ::stub::record "open_project $path" }
+proc close_project {}    { ::stub::record "close_project" }
 proc close_design {}     { ::stub::record "close_design" }
+
+# --- IP object model ---------------------------------------------------------
+#
+# Enough for generate_missing_ip.tcl: the wrapper asks whether an IP exists
+# after the project's own generator script ran, so the stub has to be able to
+# both answer "no" and be changed to "yes" by create_ip.
+
+proc get_ips {args} {
+    variable ::stub::ips
+    set names [lsearch -all -inline -not $args -quiet]
+    if {![llength $names]} { return $::stub::ips }
+    set wanted [lindex $names 0]
+    if {$wanted in $::stub::ips} { return $wanted }
+    return {}
+}
+
+proc create_ip {args} {
+    variable ::stub::ips
+    set index [lsearch -exact $args -module_name]
+    if {$index < 0} {
+        error "create_ip without -module_name"
+    }
+    set name [lindex $args [expr {$index + 1}]]
+    if {$name ni $::stub::ips} { lappend ::stub::ips $name }
+    ::stub::record "create_ip $name"
+}
+
+proc create_ip_run {name} {
+    ::stub::set_run "${name}_synth_1" PROGRESS "0%" STATUS "Not started"
+    ::stub::record "create_ip_run $name"
+}
+
+proc set_property {args}            { ::stub::record "set_property" }
+proc generate_target {args}         { ::stub::record "generate_target $args" }
+proc export_ip_user_files {args}    { ::stub::record "export_ip_user_files" }
 
 proc get_designs {args} { return {} }
 

@@ -228,6 +228,26 @@ def format_report(environment, comparison):
     return "\n".join(lines)
 
 
+def write_assessment(outdir, environment, comparison):
+    """Grade this stage and write ``risk_env.json``.
+
+    Stage 0 has no failure it can report through an exit code -- a changed
+    Vivado version is a real finding but not a reason to stop, so the command
+    succeeds. Without a verdict file the end-of-stage banner would grade on the
+    exit status alone and print a green PASS over a CRITICAL. Writing the
+    assessment here is what lets it tell the truth.
+    """
+    try:
+        import risk_rules
+    except ImportError:
+        return None
+
+    assessment = risk_rules.evaluate(environment=environment,
+                                     environment_comparison=comparison)
+    _write_json(os.path.join(outdir, "risk_env.json"), assessment)
+    return assessment
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Record and compare the tool/OS environment for a run.")
@@ -252,6 +272,7 @@ def main(argv=None):
         _write_json(_path(args.outdir, "current"), environment)
     _write_json(compare_path(args.outdir),
                 {"environment": environment, "comparison": comparison})
+    write_assessment(args.outdir, environment, comparison)
 
     print("{0} {1}".format(CHANGED_MARKER,
                            "yes" if comparison["changed"] else "no"))
