@@ -42,6 +42,39 @@ def _read(path):
         return handle.read()
 
 
+# ast.parse only produces Constant nodes from Python 3.8 on. Under 3.6/3.7 a
+# string literal is ast.Str and True is ast.NameConstant, so matching Constant
+# alone extracted nothing at all: the inventory collapsed to the six LOG.* ids
+# built from the runtime table, and the reconciliation then compared the skill
+# docs against almost no code. This repo targets Python 3.4+, and the tests have
+# to honour that too -- an offline workstation is exactly where the old
+# interpreter lives.
+#
+# ast.Str was removed in 3.12, hence getattr rather than a direct reference.
+# Constant is checked first because on 3.8-3.11 ast.Str has a custom
+# __instancecheck__ that also matches Constant nodes.
+_AST_STR = getattr(ast, "Str", ())
+_AST_NAME_CONSTANT = getattr(ast, "NameConstant", ())
+
+
+def string_literal(node):
+    """The str value of a literal node, on any supported Python."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if _AST_STR and isinstance(node, _AST_STR):
+        return node.s
+    return None
+
+
+def is_true_literal(node):
+    """Whether a node is the literal ``True``, on any supported Python."""
+    if isinstance(node, ast.Constant):
+        return node.value is True
+    if _AST_NAME_CONSTANT and isinstance(node, _AST_NAME_CONSTANT):
+        return node.value is True
+    return False
+
+
 def collect_rules():
     """Every rule id ``risk_rules`` can emit, and whether it blocks bring-up.
 
@@ -61,14 +94,13 @@ def collect_rules():
             continue
 
         blocks_bringup = any(
-            keyword.arg == "blocks_bringup"
-            and isinstance(keyword.value, ast.Constant)
-            and keyword.value.value is True
+            keyword.arg == "blocks_bringup" and is_true_literal(keyword.value)
             for keyword in node.keywords)
 
         first = node.args[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            rules[first.value] = blocks_bringup
+        identifier = string_literal(first)
+        if identifier is not None:
+            rules[identifier] = blocks_bringup
         elif isinstance(first, ast.Call):
             # "LOG.{0}".format(key) -- expand over the curated message classes.
             for key in risk_rules._LOG_CLASS_RULES:
@@ -151,6 +183,43 @@ class TestSkillStructure(unittest.TestCase):
                     mentioned))
 
 
+class TestExtractionWorksOnOlderPython(unittest.TestCase):
+    """The workstation runs whatever python3 the OS shipped, often 3.6.
+
+    Everything else in this file is downstream of the literal extraction, so if
+    it silently returns nothing on an older interpreter the whole reconciliation
+    turns into a comparison against an empty set.
+    """
+
+    def test_constant_nodes_are_read(self):
+        node = ast.parse("f('RULE.ID')").body[0].value.args[0]
+        self.assertEqual(string_literal(node), "RULE.ID")
+
+    def test_true_keyword_is_recognised(self):
+        node = ast.parse("f(x=True)").body[0].value.keywords[0].value
+        self.assertTrue(is_true_literal(node))
+        node = ast.parse("f(x=False)").body[0].value.keywords[0].value
+        self.assertFalse(is_true_literal(node))
+
+    @unittest.skipUnless(_AST_STR, "ast.Str removed in this Python")
+    def test_pre_3_8_string_nodes_are_read(self):
+        """What 3.6/3.7 hand back from ast.parse."""
+        node = _AST_STR(s="RULE.ID")
+        self.assertEqual(string_literal(node), "RULE.ID")
+
+    @unittest.skipUnless(_AST_NAME_CONSTANT,
+                         "ast.NameConstant removed in this Python")
+    def test_pre_3_8_true_nodes_are_read(self):
+        node = _AST_NAME_CONSTANT(value=True)
+        self.assertTrue(is_true_literal(node))
+        self.assertFalse(is_true_literal(_AST_NAME_CONSTANT(value=False)))
+
+    def test_non_literals_return_none_rather_than_guessing(self):
+        node = ast.parse("f(name)").body[0].value.args[0]
+        self.assertIsNone(string_literal(node))
+        self.assertFalse(is_true_literal(node))
+
+
 class TestRuleInventoryReconciliation(unittest.TestCase):
     """Both directions, so neither renames nor additions can slip through."""
 
@@ -161,8 +230,15 @@ class TestRuleInventoryReconciliation(unittest.TestCase):
 
     def test_the_inventory_was_actually_extracted(self):
         # Guard against the AST walk silently finding nothing and every other
-        # assertion in this class passing vacuously.
-        self.assertGreater(len(self.rules), 30)
+        # assertion in this class passing vacuously. It has already earned its
+        # keep once: on Python 3.6/3.7 the literal path matched nothing and the
+        # inventory shrank to just the LOG.* ids, which this caught.
+        self.assertGreater(
+            len(self.rules), 30,
+            "only {0} rules extracted. If that number is 6 (the LOG.* table "
+            "alone), the AST literal match failed -- check this interpreter "
+            "({1}) against string_literal() above.".format(
+                len(self.rules), sys.version.split()[0]))
         self.assertIn("TIMING.HOLD_VIOLATION", self.rules)
         self.assertIn("LOG.CONSTRAINT_NOT_APPLIED", self.rules)
 

@@ -2,6 +2,68 @@
 
 給沒有 git 的離線工作站對照用。最新的在最上面。
 
+---
+
+## （未提交）—— 修正：`test_skill.py` 在 Python 3.6/3.7 抽不到 rule
+
+**症狀**：`make test` 有 2 個失敗，都在 `test_skill.py`：
+
+```
+test_the_inventory_was_actually_extracted     預期 > 30 條 rule，實際只有 6 條
+test_every_rule_the_skill_mentions_exists_in_the_code
+                                              skill 提到 46 個 rule ID，程式只抽到 6 個
+```
+
+**這不是複製不完整，是 `tests/test_skill.py` 自己的 bug。**
+
+`collect_rules()` 用 AST 從 `risk_rules.py` 抽出 `finding(...)` 的 rule ID，
+判斷節點型別時只認 `ast.Constant`。但 `ast.parse` 從 **Python 3.8 起**才產生
+`Constant`；**3.6/3.7 的字串字面值是 `ast.Str`、`True` 是 `ast.NameConstant`**。
+在舊直譯器上那個分支一條都比不中，只剩「LOG.* 從執行期表格展開」那條路徑還會動
+—— `_LOG_CLASS_RULES` 剛好 6 筆，就是你看到的 6。
+
+這個 repo 宣稱支援 Python 3.4+，測試卻沒有做到；離線工作站正是舊直譯器所在之處。
+
+**修正**：`tests/test_skill.py` 新增 `string_literal()` / `is_true_literal()`，
+同時認得新舊兩種節點形狀（`ast.Str` 在 3.12 已移除，故用 `getattr` 取用）。
+以 3.6/3.7 的節點形狀驗證過：抽出 57 條 rule、21 條阻擋上板，與新直譯器完全一致。
+另加 5 個測試釘住這件事，並讓數量不足時的錯誤訊息直接指出可能是直譯器版本問題。
+
+產品程式碼完全沒有這個問題 —— 只有這個測試輔助函式用到 `ast`。
+順帶用 `feature_version=(3, 6)` 檢查過全部 29 個 Python 檔，語法皆相容。
+
+### 順便從那個 46 看出來的事
+
+錯誤訊息裡的 **46 不是「應該有幾條 rule」，是不吻合的數量**。
+文件提到的 ID 數減掉抽到的 6 條就是它 —— 所以你的 skill 文件提到 52 個 ID。
+
+各版本 `references/risk-model.md` 提到的 ID 數：
+
+| 版本 | 提到的 rule ID 數 |
+|---|---|
+| `aca652d` 之前 | **52** |
+| `aca652d` 之後（含現在） | 56 |
+
+**52 表示你的 `skills/` 還是 `aca652d` 之前的版本**，但 `tests/` 已經是新的
+—— 也就是那份 copy 是混合的。只補 `tests/test_skill.py` 會修掉抽取問題，
+但接著會**正當地**報出 `aca652d` 新增的 4 條規則沒有被文件涵蓋。
+
+**請整包複製，不要挑檔案**，然後用 `sh scripts/checksums.sh` 對指紋確認。
+
+修好之後這些數字才是對的：程式碼 **57 條 rule、其中 21 條阻擋上板**，
+文件提到 56 條（唯一沒提到的 `QOR.LOW_SCORE` 不阻擋上板，文件不強制涵蓋）。
+自己確認的指令：
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0,'tests')
+import test_skill as T
+r = T.collect_rules(); m = set(T._RULE_ID.findall(T.skill_text()))
+print('程式碼', len(r), '條，阻擋上板', sum(1 for v in r.values() if v))
+print('文件提到', len(m), '條；提到但程式沒有：', sorted(m - set(r)))
+"
+```
+
 要確認手上那份是哪個版本，跑：
 
 ```bash
