@@ -51,6 +51,24 @@ status=$(run_make "$MK" check-files)
 grep -q "MISSING" "$MK/make.log" || fail "make check-files: did not report the gap"
 echo "  ok  make check-files -> ran without Vivado, caught the missing file"
 
+# EXCLUDE has to reach stage 1, not just the stage 2 Tcl audit. A setting that
+# works in one stage and is silently ignored in another is worse than no
+# setting at all -- that was the bug.
+mkdir -p "$MK/old_mem"
+cat > "$MK/old_mem/legacy.v" <<'V'
+module legacy;
+blk_mem_gen_512x32 u0 (.a(1'b0));
+endmodule
+V
+printf 'rtl/top.v\nrtl/absent.v\nold_mem/legacy.v\n' > "$MK/files.f"
+status=$(run_make "$MK" check-files EXCLUDE='*/old_mem/*')
+grep -q "blk_mem_gen_512x32" "$MK/make.log" \
+    && fail "make check-files: EXCLUDE never reached stage 1"
+grep -q "排除" "$MK/make.log" \
+    || fail "make check-files: exclusion was applied but not reported"
+echo "  ok  make check-files -> EXCLUDE reaches stage 1 and is reported"
+printf 'rtl/top.v\nrtl/absent.v\n' > "$MK/files.f"
+
 # The banner reports; it must never decide. If it swallowed the exit status,
 # `make check` would stop failing fast and `make all` would keep going through
 # a broken stage -- with everything still looking green.

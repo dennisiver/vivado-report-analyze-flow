@@ -4,7 +4,69 @@
 
 ---
 
-## （未提交）—— 修正：`test_skill.py` 在 Python 3.6/3.7 抽不到 rule
+## 讓 `EXCLUDE` 在階段 1 真的生效
+
+**症狀**：`make check-files` 報出一堆 missing IP，但 Vivado GUI 顯示一切正常。
+
+**先講清楚：那不是誤報。** 典型成因是 file list 還留著已經廢棄的目錄
+（例如 `old_mem/`），那些檔案實例化了專案裡已經不存在的 IP。
+GUI 乾淨是因為**專案根本沒有那個目錄**，Vivado 從來沒看過那些檔案。
+所以是 file list 與專案不同步，階段 1 正確地報出來了。
+
+比對的東西完全在 Vivado 之外：被實例化的模組（regex 掃 file list ∪ `.xpr`
+的來源檔）對上有定義的模組，再扣掉 UNISIM primitive、`IGNORE_MODULES`、
+以及**`.xpr` 裡以 `.xci` 結尾的檔案路徑**。認得一個 IP 的唯一途徑是它的
+`.xci` 字面出現在 `.xpr` 的 `<FileSets>` 裡。
+
+**真正的缺陷**：`EXCLUDE` 這個設定早就存在，也早就接到階段 2
+（`preflight_and_run.tcl` 的 `-exclude`），但**階段 1 完全沒有排除機制** ——
+`filelist.py` 連 `exclude` 這個字都沒有，`FILELIST_ARGS` 也沒傳。
+設了 `EXCLUDE` 的人會發現階段 2 有效、階段 1 靜靜地無效。
+
+### 改了什麼
+
+- `python/filelist.py`：新增 `--exclude <glob>`（可重複）與 `check(exclude=)`。
+  被排除的檔案**同時**退出存在性檢查、模組掃描與專案對帳（含專案那一側，
+  否則路徑會從清單消失又以 `only_in_project` 冒出來）
+- `Makefile`：`FILELIST_ARGS` 接上同一個 `EXCLUDE` 變數，不新增第二個設定
+- `python/signoff_report.py`：file list 那段帶出排除數量與樣式
+- 文件：`README.md`、`stages-and-commands.md`、`config.mk.example`
+
+### 比對語意
+
+樣式對**絕對路徑**比對，`*` 會跨過 `/`，大小寫敏感 —— 與階段 2 的
+`::vra::is_excluded`（Tcl `string match`）完全一致。
+**所以寫 `*/old_mem/*`，不是 `old_mem/*`。**
+刻意不支援相對寫法：那會讓同一個樣式在階段 1 命中、階段 2 沒命中，
+正好是這次要修掉的那種不一致。
+
+### 排除永遠看得見
+
+```
+excluded: 依 1 個樣式排除了 2 個檔案（未經檢查）
+          */old_mem/*  -> 2 個
+```
+
+沒命中任何檔案的樣式會標成 `← 沒有命中任何檔案`，
+不會讓打錯字的樣式看起來像生效了。簽核報告也會帶出排除數量。
+
+### 取捨（文件裡也這樣寫）
+
+`EXCLUDE` 是給「**不能改 file list**」的情況用的，例如那份清單同時被模擬流程
+或其他工具共用。若 `old_mem/` 真的已經不需要，**正解是從 file list 拿掉** ——
+排除只是把一個真實的不同步訊號蓋住。
+
+### 你要做的
+
+`config.mk` 加一行：
+
+```make
+EXCLUDE = */old_mem/*
+```
+
+---
+
+## 修正：`test_skill.py` 在 Python 3.6/3.7 抽不到 rule
 
 **症狀**：`make test` 有 2 個失敗，都在 `test_skill.py`：
 
@@ -63,14 +125,6 @@ print('程式碼', len(r), '條，阻擋上板', sum(1 for v in r.values() if v)
 print('文件提到', len(m), '條；提到但程式沒有：', sorted(m - set(r)))
 "
 ```
-
-要確認手上那份是哪個版本，跑：
-
-```bash
-sh scripts/checksums.sh
-```
-
-把輸出跟本檔最後的〈檔案指紋〉比對，或在兩份 copy 上各跑一次再 `diff`。
 
 ---
 
@@ -272,69 +326,33 @@ IGNORE_MODULES = my_encrypted_ip vendor_macro
 2. 把新版整包複製過去，或依上面的檔案清單逐檔複製
    —— 注意 `scripts/` 是**新目錄**
 3. `chmod +x scripts/*.sh`
-4. `sh scripts/checksums.sh` 與下面的〈檔案指紋〉比對
+4. 在新舊兩份各跑一次 `sh scripts/checksums.sh` 再 `diff`（見〈怎麼確認版本〉）
 5. `make test` 確認全綠（不需要 Vivado）
-6. 依上面「要你動手的兩件事」改 `config.mk` 與你的 IP 產生腳本
-7. `make check-files` 看 `blk_mem_gen_1216x80` 是否出現
+6. 依各節「你要做的」改 `config.mk` 與你的 IP 產生腳本
+7. `make check-files` 確認結果符合預期
 
 ---
 
-## 檔案指紋（dcb9b92 之後）
+## 怎麼確認版本
 
-`sh scripts/checksums.sh` 的輸出。`scripts/checksums.sh` 自己那行會因為
-本檔與它自身的內容而變動，其餘應該完全一致。
+**不要靠背指紋表** —— 這份檔案自己的雜湊會隨每次更新而變，寫在裡面永遠是錯的。
+兩份 copy 各跑一次再 diff 才是可靠的做法：
 
-```
-a96e0798ddbb  Makefile
-e1cc31b3761c  README.md
-6a47e92014aa  config.mk.example
-8530e2ab19e2  docs/opencode-integration.md
-5bd6fced8397  docs/skill-authoring.md
-8297fa6ba369  examples/sample_project.xpr
-a0bfd83be88f  python/analyze_run.py
-b682f6d4c5c2  python/banner.py
-f19693c5c8d0  python/check_reports.py
-f26632250290  python/environment.py
-ab3c799c4a1c  python/filelist.py
-0088a0d9740a  python/flow_summary.py
-0c8f3f0942b6  python/manifest.py
-141a0cef7e43  python/precheck.py
-d10cc4d24402  python/report_tables.py
-40a418f3079d  python/risk_report.py
-def343c16fdf  python/risk_rules.py
-3f7837a78c53  python/signoff_report.py
-d45c63fab3a3  python/trend.py
-b404bca96f8e  python/vivado_log.py
-a1b74106bf73  python/vivado_report_parser.py
-d7b946e81eea  python/vivado_reports.py
-8057698b1d92  python/waivers.py
-cde9286c0fca  scripts/precheck.sh
-b08f85bac614  scripts/with_banner.sh
-bb91fbaccd0f  skills/vivado-fpga-flow/SKILL.md
-e87fe69079b2  skills/vivado-fpga-flow/references/fpga-interpretation.md
-4ecb32a423f9  skills/vivado-fpga-flow/references/risk-model.md
-ba0bda5c7ef8  skills/vivado-fpga-flow/references/stages-and-commands.md
-162986ef6b87  tcl/check_environment.tcl
-c84c68b079d2  tcl/elaborate_check.tcl
-485732cfafaa  tcl/generate_missing_ip.tcl
-73e167dca5da  tcl/preflight_and_run.tcl
-8f2f42389ec7  tcl/timing_report_hooks.tcl
-eda0a5bb8f76  tests/run_tests.sh
-e5af73ec12f4  tests/test_banner.py
-93c173e25e26  tests/test_environment.py
-911434e4ea5d  tests/test_filelist.py
-88da1801c33e  tests/test_gen_ip.tcl
-b711f38e5a93  tests/test_manifest.py
-567c559d1892  tests/test_parser.py
-fa1d8aaf7d62  tests/test_precheck.py
-0466a70798ed  tests/test_preflight.tcl
-18e8e7617017  tests/test_reports.py
-f3a25e65850f  tests/test_risk_rules.py
-ff6e0a0e9e50  tests/test_signoff.py
-2bd13157aaa4  tests/test_skill.py
-78ef11d502fd  tests/test_vivado_log.py
-5e3d28a618db  tests/test_waivers.py
-3ba937b32cd0  tests/vivado_stub.tcl
+```bash
+sh scripts/checksums.sh > /tmp/old.txt    # 工作站上那份
+sh scripts/checksums.sh > /tmp/new.txt    # 新複製過去的
+diff /tmp/old.txt /tmp/new.txt
 ```
 
-`examples/` 底下的 `.rpt` 樣本自 `aca652d` 起未變動，為節省篇幅未列出。
+`checksums.sh` 會排除 `config.mk` 與 `timing_analysis/`，
+所以你的專案設定與輸出不會混進來。
+
+只有一份、想知道停在哪一版時，看這幾個標記：
+
+| 檢查 | 代表 |
+|---|---|
+| `ls scripts/` 不存在 | 早於 `dcb9b92`（沒有 banner、pre-check、gen-ip） |
+| `ls CHANGELOG.md` 不存在 | 早於 `57b7e7d` |
+| `ls examples/sample_project.xpr` 不存在 | 早於 `aca652d`（沒有模組層級檢查） |
+| `grep -c exclude python/filelist.py` 是 0 | 早於本次的 `EXCLUDE` 修正 |
+| `grep -o '全部 [0-9]* 條' skills/vivado-fpga-flow/SKILL.md` 印出 47 | 早於 `7154ef0` |

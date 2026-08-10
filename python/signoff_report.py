@@ -268,6 +268,14 @@ def render(data):
         lines.append("")
         lines.append("File list：{0} 個檔案，{1} 個缺失。".format(
             filelist.get("file_count", 0), len(filelist.get("missing_files") or [])))
+        # Whoever signs this has to be able to see what it does not cover.
+        excluded = filelist.get("excluded") or []
+        patterns = filelist.get("exclude_patterns") or []
+        if patterns:
+            lines.append("**另有 {0} 個檔案被排除、未經檢查**，"
+                         "排除樣式：{1}。".format(
+                             len(excluded),
+                             "、".join("`{0}`".format(p) for p in patterns)))
     lines.append("")
 
     # --- findings --------------------------------------------------------

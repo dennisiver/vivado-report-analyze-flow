@@ -491,3 +491,107 @@ class TestReconciliationActuallyRuns(FileListCase):
                  if f["id"] == "FILELIST.PROJECT_NOT_CHECKED"][0]
         self.assertEqual(found["severity"], risk_rules.CRITICAL)
         self.assertFalse(assessment["verdict"]["signoff_ok"])
+
+
+class TestExclusion(FileListCase):
+    """`EXCLUDE` existed and worked in stage 2, but stage 1 silently ignored it.
+
+    The reported case: a file list still referencing an obsolete `old_mem/`
+    directory whose Verilog instantiates IP the project no longer has. The
+    findings were real -- the list had drifted from the project -- but there
+    was no supported way to declare the directory out of scope.
+    """
+
+    def build(self):
+        self.write("rtl/top.v", "module top; endmodule")
+        self.write("old_mem/legacy.v",
+                   "module legacy;\n"
+                   "blk_mem_gen_512x32 u0 (.a(1'b0));\n"
+                   "endmodule\n")
+        return self.write("files.f",
+                          "rtl/top.v\nold_mem/legacy.v\nold_mem/gone.v\n")
+
+    def test_without_exclusion_everything_is_reported(self):
+        result = filelist.check([self.build()])
+        self.assertEqual(len(result["missing_files"]), 1)
+        self.assertIn("blk_mem_gen_512x32", result["undefined"])
+        self.assertEqual(filelist.sram_specs(result), ["512x32"])
+
+    def test_excluded_files_drop_out_of_every_check(self):
+        result = filelist.check([self.build()], exclude=["*/old_mem/*"])
+
+        self.assertEqual(result["missing_files"], [],
+                         "excluded paths must not be existence-checked")
+        self.assertEqual(result["undefined"], {},
+                         "modules only used by excluded files must not report")
+        self.assertEqual(filelist.sram_specs(result), [],
+                         "excluded files must not feed the IP spec list")
+
+    def test_exclusion_applies_to_the_project_side_too(self):
+        """Otherwise a path leaves the file list and returns as only_in_project."""
+        listing = self.build()
+        result = filelist.check(
+            [listing],
+            fileset_files=[os.path.join(self.dir, "rtl/top.v"),
+                           os.path.join(self.dir, "old_mem/legacy.v")],
+            project=os.path.join(self.dir, "absent.xpr"),
+            exclude=["*/old_mem/*"])
+
+        self.assertTrue(result["reconcile"]["consistent"],
+                        result["reconcile"])
+        self.assertEqual(result["reconcile"]["only_in_project"], [])
+
+    def test_what_was_excluded_is_recorded(self):
+        result = filelist.check([self.build()], exclude=["*/old_mem/*"])
+        self.assertEqual(result["exclude_patterns"], ["*/old_mem/*"])
+        self.assertEqual(
+            sorted(os.path.basename(p) for p in result["excluded"]),
+            ["gone.v", "legacy.v"])
+
+    def test_the_report_never_hides_an_exclusion(self):
+        # A silent exclusion is indistinguishable from a clean result.
+        result = filelist.check([self.build()], exclude=["*/old_mem/*"])
+        text = filelist.format_report(result)
+        self.assertIn("排除", text)
+        self.assertIn("*/old_mem/*", text)
+        self.assertIn("2", text)
+
+    def test_a_pattern_that_matches_nothing_says_so(self):
+        """A typo must not read as a working exclusion."""
+        result = filelist.check([self.build()], exclude=["*/oldmem/*"])
+        self.assertEqual(result["excluded"], [])
+        self.assertIn("沒有命中任何檔案", filelist.format_report(result))
+        # ...and the findings it was meant to silence are still there.
+        self.assertIn("blk_mem_gen_512x32", result["undefined"])
+
+    def test_no_patterns_means_no_exclusion_section(self):
+        result = filelist.check([self.build()])
+        self.assertEqual(result["exclude_patterns"], [])
+        self.assertNotIn("排除", filelist.format_report(result))
+
+
+class TestExclusionGlobMatchesStageTwo(FileListCase):
+    """Stage 1 and stage 2 must agree on what a pattern means.
+
+    Stage 2 (`::vra::is_excluded`, tcl/preflight_and_run.tcl) runs Tcl's
+    `string match` against the normalised absolute path. A pattern that hit in
+    one stage and missed in the other would recreate the inconsistency this
+    option was added to remove.
+    """
+
+    def test_matched_against_the_absolute_path(self):
+        path = self.write("old_mem/legacy.v")
+        self.assertTrue(filelist.is_excluded(path, ["*/old_mem/*"]))
+        self.assertTrue(filelist.is_excluded(path, ["*legacy.v"]))
+
+    def test_star_crosses_directory_separators_as_in_tcl(self):
+        path = self.write("a/b/c/deep.v")
+        self.assertTrue(filelist.is_excluded(path, ["*/a/*deep.v"]))
+
+    def test_case_sensitive_as_in_tcl(self):
+        path = self.write("old_mem/legacy.v")
+        self.assertFalse(filelist.is_excluded(path, ["*/OLD_MEM/*"]))
+
+    def test_no_patterns_excludes_nothing(self):
+        self.assertFalse(filelist.is_excluded("/anything.v", []))
+        self.assertFalse(filelist.is_excluded("/anything.v", None))

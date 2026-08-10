@@ -138,7 +138,8 @@ FILELIST_ARGS := --outdir $(OUTDIR) \
                  $(if $(wildcard $(OUTDIR)/manifests/filelist_$(RUN)_sources.txt),\
                     --fileset-list $(OUTDIR)/manifests/filelist_$(RUN)_sources.txt,) \
                  $(foreach d,$(RTL_DIRS),--search-dir $(d)) \
-                 $(foreach m,$(IGNORE_MODULES),--ignore-module $(m))
+                 $(foreach m,$(IGNORE_MODULES),--ignore-module $(m)) \
+                 $(foreach p,$(EXCLUDE),--exclude $(p))
 
 check-files: require-filelist
 	@echo "== 階段 1：靜態檔案檢查（不需要 Vivado）=="

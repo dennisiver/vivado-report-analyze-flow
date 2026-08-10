@@ -22,6 +22,7 @@ Standard library only, Python 3.4+.
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -231,6 +232,36 @@ def check_existence(parsed):
         "file_count": len(set(parsed["files"])),
         "incdir_count": len(set(parsed["incdirs"])),
     }
+
+
+def is_excluded(path, patterns):
+    """Glob match, mirroring ``::vra::is_excluded`` in the stage 2 Tcl audit.
+
+    Matched against the normalised absolute path, exactly as stage 2 does with
+    Tcl's ``string match``: same case sensitivity, and ``*`` crosses ``/`` in
+    both. Matching anything else here -- a path relative to the cwd, say --
+    would be friendlier to write but would let one pattern hit in stage 1 and
+    miss in stage 2, which is the very inconsistency this option exists to fix.
+
+    So patterns are anchored on absolute paths: write ``*/old_mem/*``, not
+    ``old_mem/*``. A pattern that matches nothing is reported rather than
+    passing for a clean result.
+    """
+    if not patterns:
+        return False
+    candidate = os.path.normpath(os.path.abspath(path))
+    for pattern in patterns:
+        if fnmatch.fnmatchcase(candidate, pattern):
+            return True
+    return False
+
+
+def _partition_excluded(paths, patterns):
+    """``(kept, excluded)`` for one list of paths."""
+    kept, excluded = [], []
+    for path in paths or []:
+        (excluded if is_excluded(path, patterns) else kept).append(path)
+    return kept, excluded
 
 
 def _normalise(paths):
@@ -458,13 +489,15 @@ def sram_specs(result):
 
 def check(filelist_paths, fileset_files=None, scan_duplicates=True,
           project=None, search_dirs=None, ignore_modules=None,
-          project_source=None):
+          project_source=None, exclude=None):
     """Run every static check and return one structured result.
 
     ``project`` is a ``.xpr`` to reconcile against; ``fileset_files`` an
     already-extracted list (from the Tcl audit) used when the .xpr cannot be
     read. ``search_dirs`` widens the module scan beyond the build so a module
     defined in a file nobody added can still be located and named.
+    ``exclude`` is a list of globs declaring paths out of scope; they drop out
+    of every check here, and the result records what was dropped.
     """
     combined = {"files": [], "incdirs": [], "defines": [], "lists": [],
                 "errors": []}
@@ -473,6 +506,14 @@ def check(filelist_paths, fileset_files=None, scan_duplicates=True,
         for key in combined:
             combined[key].extend(parsed[key])
 
+    # Applied before anything looks at the files: declaring a path out of scope
+    # has to take it out of the existence check, the module scan and the
+    # project reconciliation alike, or the three would disagree about what the
+    # build even is.
+    patterns = list(exclude or ())
+    combined["files"], excluded = _partition_excluded(combined["files"],
+                                                      patterns)
+
     result = {
         "available": bool(filelist_paths),
         "lists": sorted(set(combined["lists"])),
@@ -480,6 +521,8 @@ def check(filelist_paths, fileset_files=None, scan_duplicates=True,
         "files": sorted(set(combined["files"])),
         "incdirs": sorted(set(combined["incdirs"])),
         "defines": sorted(set(combined["defines"])),
+        "exclude_patterns": patterns,
+        "excluded": sorted(set(excluded)),
     }
     result.update(check_existence(combined))
 
@@ -500,6 +543,14 @@ def check(filelist_paths, fileset_files=None, scan_duplicates=True,
             else "no .xpr or fileset list supplied")
 
     if project_files is not None:
+        # The same exclusions apply to the project side. Otherwise a path
+        # declared out of scope would vanish from the file list and then
+        # reappear as "only in project".
+        project_files, project_excluded = _partition_excluded(project_files,
+                                                              patterns)
+        if project_excluded:
+            result["excluded"] = sorted(set(result["excluded"])
+                                        | set(project_excluded))
         result["reconcile"] = reconcile(combined["files"], project_files)
 
     # --- module level -----------------------------------------------------
@@ -564,6 +615,19 @@ def format_report(result):
     lines.append("  lists   : {0}".format(len(result["lists"])))
     lines.append("  files   : {0} referenced, {1} missing".format(
         result["file_count"], len(result["missing_files"])))
+
+    # Always printed when patterns were given, including when nothing matched.
+    # A silent exclusion is indistinguishable from a clean result, and a
+    # mistyped pattern that quietly excludes nothing is worse still.
+    patterns = result.get("exclude_patterns") or []
+    if patterns:
+        excluded = result.get("excluded") or []
+        lines.append("  excluded: 依 {0} 個樣式排除了 {1} 個檔案（未經檢查）"
+                     .format(len(patterns), len(excluded)))
+        for pattern in patterns:
+            hits = sum(1 for path in excluded if is_excluded(path, [pattern]))
+            lines.append("            {0}  -> {1} 個{2}".format(
+                pattern, hits, "  ← 沒有命中任何檔案" if not hits else ""))
     for path in result["missing_files"][:20]:
         lines.append("            MISSING {0}".format(path))
     if result["missing_incdirs"]:
@@ -653,6 +717,11 @@ def main(argv=None):
     parser.add_argument("--ignore-module", action="append", default=[],
                         help="treat this module as defined elsewhere "
                              "(repeatable)")
+    parser.add_argument("--exclude", action="append", default=[],
+                        help="glob for paths that are out of scope, e.g. "
+                             "'*/old_mem/*'. Same patterns the Tcl audit takes "
+                             "(repeatable). Excluded files are reported, never "
+                             "silently dropped")
     parser.add_argument("--outdir", default="timing_analysis")
     parser.add_argument("--no-duplicate-scan", action="store_true")
     args = parser.parse_args(argv)
@@ -665,7 +734,7 @@ def main(argv=None):
     result = check(args.filelist, fileset,
                    scan_duplicates=not args.no_duplicate_scan,
                    project=args.project, search_dirs=args.search_dir,
-                   ignore_modules=args.ignore_module)
+                   ignore_modules=args.ignore_module, exclude=args.exclude)
 
     print(format_report(result))
 
